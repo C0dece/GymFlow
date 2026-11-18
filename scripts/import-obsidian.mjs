@@ -120,7 +120,7 @@ export function convert(week1, week2) {
     const templateId = n => id('template/' + n);
     const program = {
         kind: 'program', id: id('program'), title: 'Возвращение в зал',
-        enabled: true, anchor: planned[0].date, participantIds: [people[0].profile.id],
+        enabled: true, anchor: planned[0].date, participantIds: people.map(p => p.profile.id),
         days: planned.map(day => ({
             id: templateId(day.number), title: day.title, weekday: day.weekday, notes: day.notes.join('\n'),
             exercises: day.rows.map(row => {
@@ -163,8 +163,24 @@ function planText(set) {
     return (set.weightKnown ? set.weight : '?') + ' × ' + reps;
 }
 
+export function sanitizeFilename(name) {
+    return name
+        .replace(/[:\\/*?"<>|]/g, ' — ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\.+$/, '');
+}
+
+export function filenameFor(doc) {
+    if (doc.kind === 'program') return sanitizeFilename(doc.title) + '.md';
+    if (doc.kind === 'profile') return sanitizeFilename(doc.name) + '.md';
+    if (doc.kind === 'exercise') return sanitizeFilename(doc.name) + '.md';
+    if (doc.kind === 'session') return `${doc.date} ${sanitizeFilename(doc.title)}.md`;
+    return doc.id + '.md';
+}
+
 export function markdown(model) {
-    const header = ['---', 'gymflow_schema: 2', 'id: ' + model.id, 'kind: ' + model.kind];
+    const header = ['---', 'gymflow_schema: 3', 'id: ' + model.id, 'kind: ' + model.kind];
     const report = ['# ' + escape(model.title ?? model.name), ''];
     if (model.kind === 'session') {
         header.push('date: ' + model.date, 'status: completed', 'participants: [' + model.workouts.map(w => w.profile.id).join(', ') + ']');
@@ -193,36 +209,42 @@ export function markdown(model) {
             }
             report.push('');
         }
+    } else if (model.kind === 'exercise') {
+        const loadDesc = model.load === 'DUMBBELL' ? 'на одну гантель' :
+            model.load === 'BARBELL' ? 'полный вес штанги' :
+            model.load === 'MACHINE' ? 'нагрузка тренажёра' :
+            model.load === 'BODYWEIGHT' ? 'добавочная нагрузка' : 'тип нагрузки не указан';
+        report.push(loadDesc + ', кг. Повторы: ' + model.repsMin + (model.repsMin === model.repsMax ? '' : '-' + model.repsMax));
+    } else if (model.kind === 'profile') {
+        report.push('Профиль участника');
     }
     return [...header, '---', '', '<!-- gymflow:report -->', ...report, '<!-- /gymflow:report -->', '',
         '<!-- gymflow:json', JSON.stringify(model, null, 2).replaceAll('-->', '--\\u003e'), 'gymflow:json -->', ''].join('\n');
 }
 
 function main() {
-    const [week1, week2, output] = process.argv.slice(2);
+    const args = process.argv.slice(2);
+    const useUuid = args.includes('--uuid-names');
+    const filtered = args.filter(a => !a.startsWith('--'));
+    const [week1, week2, output] = filtered;
     if (!week1 || !week2 || !output) {
-        throw new Error('Синтаксис: node scripts/import-obsidian.mjs <W43.md> <W44.md> <новая папка GymFlow>');
+        throw new Error('Синтаксис: node scripts/import-obsidian.mjs <W43.md> <W44.md> <папка GymFlow> [--uuid-names]');
     }
     const target = resolve(output);
-    if (existsSync(target)) throw new Error('Выходная папка уже существует. Выберите новую папку.');
     const result = convert(readFileSync(week1, 'utf8'), readFileSync(week2, 'utf8'));
     const groups = { 'Программы': [result.program], 'Тренировки': result.sessions,
         'Упражнения': result.catalog, 'Участники': result.profiles };
-    const staging = target + '.importing-' + process.pid;
-    mkdirSync(dirname(target), { recursive: true });
-    mkdirSync(staging);
-    try {
-        for (const [folder, documents] of Object.entries(groups)) {
-            mkdirSync(join(staging, folder));
-            for (const document of documents) {
-                writeFileSync(join(staging, folder, document.id + '.md'), markdown(document), { encoding: 'utf8', flag: 'wx' });
-            }
+
+    mkdirSync(target, { recursive: true });
+    for (const [folder, documents] of Object.entries(groups)) {
+        const dir = join(target, folder);
+        mkdirSync(dir, { recursive: true });
+        for (const document of documents) {
+            const fileName = useUuid ? document.id + '.md' : filenameFor(document);
+            writeFileSync(join(dir, fileName), markdown(document), { encoding: 'utf8' });
         }
-        renameSync(staging, target);
-    } catch (failure) {
-        rmSync(staging, { recursive: true, force: true });
-        throw failure;
     }
+
     const actuals = result.sessions.flatMap(s => s.workouts).flatMap(w => w.exercises)
         .flatMap(e => e.athletes[0].sets).filter(s => s.actual);
     const confirmed = actuals.filter(set => set.status === 'COMPLETED').length;

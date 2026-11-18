@@ -87,4 +87,25 @@ class MarkdownTest {
     @Test fun acceptsCrlfAndBom() {
         assertEquals(Markdown.read(golden), Markdown.read("\uFEFF" + golden.replace("\n", "\r\n")))
     }
+
+    @Test fun importedObsidianFilesAreReadWithoutErrors() {
+        val dirs = listOf(
+            java.io.File("qa-output/test-import"),
+            java.io.File("d:/Заметки/Obsidian/Codece/Личное/Здоровье/Тренировки")
+        )
+        for (dir in dirs) {
+            if (!dir.isDirectory) continue
+            val files = dir.walkTopDown().filter { it.isFile && it.extension == "md" }.toList()
+            for (file in files) {
+                val text = file.readText()
+                val doc = Markdown.read(text)?.document ?: continue
+                when (doc) {
+                    is Program -> assertEquals("Возвращение в зал", doc.title)
+                    is Exercise -> assertTrue(doc.name.isNotBlank())
+                    is Profile -> assertTrue(doc.name in listOf("Алексей", "Партнёр"))
+                    else -> Unit
+                }
+            }
+        }
+    }
 }
