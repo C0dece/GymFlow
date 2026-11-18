@@ -1,0 +1,158 @@
+@file:OptIn(ExperimentalLayoutApi::class)
+
+package app.gymflow.ui
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import app.gymflow.R
+import app.gymflow.data.Library
+import app.gymflow.data.Preferences
+import app.gymflow.domain.*
+
+@Composable
+fun ExerciseEditor(
+    title: String,
+    library: Library,
+    prefs: Preferences,
+    initial: ExercisePlan? = null,
+    close: () -> Unit,
+    options: @Composable () -> Unit = {},
+    save: (ExercisePlan, Exercise?) -> Unit,
+) {
+    val recent = remember(library.sessions) {
+        library.sessions.asSequence().flatMap { session -> session.workouts.asSequence() }
+            .flatMap { it.exercises.asSequence() }.map { it.exercise.id }.distinct().take(8).toList()
+    }
+    val preferred = remember(library.programs) {
+        library.programs.flatMap { it.days }.flatMap { it.exercises }.map { it.exercise.id }.toSet()
+    }
+    val firstPlan = initial?.sets?.firstOrNull()
+    var name by rememberSaveable { mutableStateOf(initial?.exercise?.name.orEmpty()) }
+    var picked by rememberSaveable { mutableStateOf(initial?.exercise?.id) }
+    var filter by rememberSaveable { mutableIntStateOf(0) }
+    var showOptions by rememberSaveable { mutableStateOf(initial != null) }
+    var load by rememberSaveable { mutableStateOf(initial?.exercise?.load ?: Load.OTHER) }
+    var unit by rememberSaveable { mutableStateOf(initial?.exercise?.unit ?: prefs.unit) }
+    var count by rememberSaveable { mutableStateOf((initial?.sets?.size ?: prefs.initialSets).toString()) }
+    var first by rememberSaveable { mutableStateOf(if (firstPlan?.repsKnown == false) "" else (firstPlan?.repsMin ?: prefs.minReps).toString()) }
+    var last by rememberSaveable { mutableStateOf(if (firstPlan?.repsKnown == false) "" else (firstPlan?.repsMax ?: prefs.maxReps).toString()) }
+    var weight by rememberSaveable { mutableStateOf(if (firstPlan?.weightKnown == false) "" else number(firstPlan?.weight ?: prefs.initialWeight)) }
+    var warmup by rememberSaveable { mutableStateOf(firstPlan?.warmup ?: false) }
+    val selected = library.exercises.find { it.id == picked }
+        ?: initial?.exercise?.takeIf { it.id == picked }
+        ?: library.exercises.find { !it.archived && it.name.trim().equals(name.trim(), ignoreCase = true) }
+    val suggestions = library.exercises.filter { exercise ->
+        !exercise.archived && exercise.id != picked && when {
+            name.isNotBlank() && picked == null -> exercise.name.contains(name.trim(), true)
+            filter == 1 -> exercise.favorite
+            filter == 2 -> exercise.id in preferred
+            else -> exercise.id in recent
+        }
+    }.take(6)
+    val sets = count.toIntOrNull()?.takeIf { it in 1..30 }
+    val min = positiveInt(first)
+    val max = positiveInt(last)
+    val amount = decimal(weight)
+    val numericRange = min != null && max != null && min <= max
+    val unspecifiedRange = first.isBlank() && last.isBlank()
+    val ready = name.isNotBlank() && sets != null && (numericRange || unspecifiedRange) && (amount != null || weight.isBlank())
+    EditorSheet(title, close) {
+        Field(name, stringResource(R.string.exercise_name), { name = it; picked = null }, Modifier.fillMaxWidth().testTag("exercise_name"))
+        if (initial == null && name.isBlank() && library.exercises.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(stringResource(R.string.recent), stringResource(R.string.favorites), stringResource(R.string.from_program)).forEachIndexed { index, text ->
+                    FilterChip(filter == index, { filter = index }, label = { Text(text) })
+                }
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            suggestions.forEach { choice ->
+                SuggestionChip(onClick = {
+                    picked = choice.id
+                    name = choice.name
+                    load = choice.load
+                    unit = choice.unit
+                    first = choice.repsMin.toString()
+                    last = choice.repsMax.toString()
+                }, label = { Text(choice.name) })
+            }
+        }
+        if (showOptions) {
+            if (selected == null) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Load.entries.forEach { option ->
+                        FilterChip(load == option, { load = option }, label = { Text(loadText(option)) })
+                    }
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    UnitWeight.entries.forEach { option ->
+                        FilterChip(unit == option, { unit = option }, label = { Text(unitText(option)) })
+                    }
+                }
+            } else Muted("${loadText(selected.load)} · ${unitText(selected.unit)}")
+            Field(count, stringResource(R.string.set_count), { count = it }, keyboard = KeyboardType.Number)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Field(first, stringResource(R.string.min_reps), { first = it }, Modifier.weight(1f), KeyboardType.Number)
+                Field(last, stringResource(R.string.max_reps), { last = it }, Modifier.weight(1f), KeyboardType.Number)
+            }
+            Field(weight, stringResource(R.string.weight_unit, unitText(unit)), { weight = it }, keyboard = KeyboardType.Decimal)
+            FilterChip(warmup, { warmup = !warmup }, label = { Text(stringResource(R.string.warmup_first)) })
+        } else if (sets != null && min != null && max != null && amount != null) {
+            Muted(stringResource(R.string.plan_details, sets, repRange(min, max), number(amount), unitText(unit)))
+        }
+        OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.testTag("exercise_options")) {
+            Text(stringResource(if (showOptions) R.string.hide_options else R.string.exercise_options))
+        }
+        options()
+        Button(enabled = ready, onClick = {
+            if (sets != null && ready) {
+                val low = min ?: firstPlan?.repsMin ?: prefs.minReps
+                val high = max ?: firstPlan?.repsMax ?: prefs.maxReps
+                val setPlan = SetPlan(amount ?: 0.0, low, high, warmup, weightKnown = amount != null,
+                    maxEffort = unspecifiedRange && firstPlan?.maxEffort == true, repsKnown = numericRange,
+                    targetReps = firstPlan?.targetReps?.takeIf { numericRange && it in low..high })
+                val exercise = selected ?: Exercise(name = name.trim(), unit = unit, load = load, repsMin = low, repsMax = high)
+                val same = initial != null && sets == initial.sets.size && firstPlan == setPlan
+                val plans = if (same) initial.sets else List(sets) { setPlan.copy(warmup = warmup && it == 0) }
+                save(ExercisePlan(exercise, plans, initial?.individual.orEmpty()), exercise.takeIf { selected == null })
+            }
+        }, modifier = Modifier.fillMaxWidth().testTag("save_exercise")) {
+            Text(if (initial == null) stringResource(R.string.add) else stringResource(R.string.save))
+        }
+        TextButton(onClick = close, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.cancel)) }
+    }
+}
+
+@Composable
+fun PersonEditor(
+    library: Library, session: Session?, close: () -> Unit,
+    options: @Composable () -> Unit = {},
+    save: (Profile, Boolean) -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var permanent by rememberSaveable { mutableStateOf(session == null) }
+    val candidates = library.availableProfiles.filter { p -> session != null && session.participants.none { it.id == p.id } }
+    EditorSheet(stringResource(R.string.add_person), close) {
+        options()
+        if (candidates.isNotEmpty()) {
+            SectionTitle(stringResource(R.string.choose_profile))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                candidates.forEach { profile -> SuggestionChip({ save(profile, false) }, label = { Text(profile.name) }) }
+            }
+        }
+        Field(name, stringResource(R.string.name), { name = it }, Modifier.fillMaxWidth().testTag("person_name"))
+        if (session != null) {
+            FilterChip(permanent, { permanent = !permanent }, label = { Text(stringResource(R.string.permanent_profile)) })
+        }
+        Button(onClick = { save(Profile(name = name.trim()), permanent) }, enabled = name.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().testTag("save_person")) { Text(stringResource(R.string.add)) }
+        TextButton(onClick = close, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.cancel)) }
+    }
+}

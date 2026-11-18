@@ -1,0 +1,137 @@
+<resources>
+    <string name="progression">Прогрессия</string>
+    <string name="unreadable_documents">Нечитаемых записей: %1$d. Исходники доступны в резервном архиве.</string>
+    <string name="configure_progression">Настроить стратегию</string>
+    <string name="practice_progression">Предварительный расчёт</string>
+    <string name="progression_history">История рекомендаций</string>
+    <string name="progression_no_history">Завершите тренировку с записанными подходами. Здесь появятся рекомендации.</string>
+    <string name="prepare_training">Подготовить тренировку</string>
+    <string name="policy_scope">Область действия</string>
+    <string name="strategy">Стратегия</string>
+    <string name="lock_load">Зафиксировать нагрузку</string>
+    <string name="advanced_progression">Расширенные параметры</string>
+    <string name="custom_rules">Правила</string>
+    <string name="add_rule">Добавить правило</string>
+    <string name="edit_rule">Изменить правило</string>
+    <string name="all_conditions">Условия выполняются одновременно. Пустой список подходит всегда.</string>
+    <string name="rule_amount">Величина действия</string>
+    <string name="rule_percent">Процент вместо кг</string>
+    <string name="rule_priority">Приоритет</string>
+    <string name="condition_window">Занятий для оценки</string>
+    <string name="condition_threshold">Порог (RIR или кг)</string>
+    <string name="rule_name">Название правила</string>
+    <string name="invalid_progression">Проверьте диапазоны и числовые значения.</string>
+    <string name="equipment_weights">Доступные веса в кг, через пробел</string>
+    <string name="weight_step_kg">Шаг сетки, кг</string>
+    <string name="min_delta">Мин. изменение, кг</string>
+    <string name="max_delta">Макс. изменение, кг</string>
+    <string name="max_delta_pct">Макс. изменение, %</string>
+    <string name="weight_min">Мин. рабочий вес, кг</string>
+    <string name="weight_max">Макс. рабочий вес, кг</string>
+    <string name="rule_reps_min">Мин. повторов</string>
+    <string name="rule_reps_max">Макс. повторов</string>
+    <string name="rule_sets_min">Мин. рабочих подходов</string>
+    <string name="rule_sets_max">Макс. рабочих подходов</string>
+    <string name="target_rir">Целевой RIR</string>
+    <string name="rir_required">Требовать записанный RIR для повышения</string>
+    <string name="min_observations">Мин. тренировок с фактом</string>
+    <string name="failure_window">Недовыполнений подряд для разгрузки</string>
+    <string name="deload_value">Снижение при разгрузке, %</string>
+    <string name="linear_pct">Линейный шаг в %, оставьте пустым для кг</string>
+    <string name="wave">Этапы волны</string>
+    <string name="add_wave">Добавить этап</string>
+    <string name="wave_weight">Вес, %</string>
+    <string name="wave_reps">Изменение повторов</string>
+    <string name="wave_sets">Изменение подходов</string>
+    <string name="rule_matches">Сработали правила: %1$s</string>
+    <string name="no_evidence">Подтверждённая история по этому упражнению пока отсутствует.</string>
+    <string name="used_evidence">Данные для решения</string>
+    <string name="decision_stat">%1$s · %2$d/%3$d подходов · мин. %4$s повт. · %5$s кг · RIR %6$s</string>
+    <string name="current_plan">Текущий план</string>
+    <string name="suggested_plan">Предложенный план</string>
+    <string name="accept_progression">Принять</string>
+    <string name="keep_progression">Оставить</string>
+    <string name="change_progression">Изменить вручную</string>
+    <string name="selected_progression">Выбрано: %1$s</string>
+    <string name="exercise_plan_summary">%1$d подх. · %2$s %3$s · %4$s повт.</string>
+    <string name="body_discomfort">Боль или выраженный дискомфорт</string>
+    <string name="high_fatigue">Высокая усталость</string>
+    <string name="archived_profile">В архиве</string>
+    <string name="archive_profile">Архивировать профиль</string>
+    <string name="target_reps_value">цель %1$d</string>
+    <string name="settings_unavailable">Не удалось загрузить журнал</string>
+    <string name="progression_applied">Принятые решения</string>
+    <string name="show_details">Данные решения</string>
+    <string-array name="progression_strategies">
+        <item>Автоматическая</item>
+        <item>Двойная</item>
+        <item>Линейная</item>
+        <item>По повторениям</item>
+        <item>По объёму</item>
+        <item>По RIR</item>
+        <item>Волновая</item>
+        <item>Поддержание</item>
+        <item>Разгрузка</item>
+        <item>Пользовательская</item>
+    </string-array>
+    <string-array name="progression_actions">
+        <item>Повысить вес</item>
+        <item>Снизить вес</item>
+        <item>Сохранить план</item>
+        <item>Повысить повторы</item>
+        <item>Изменить число подходов</item>
+        <item>Предложить разгрузку</item>
+        <item>Повторить план</item>
+        <item>Следующий этап волны</item>
+        <item>Пересмотреть упражнение</item>
+        <item>Недостаточно данных</item>
+    </string-array>
+    <string-array name="progression_conditions">
+        <item>Все рабочие подходы выполнены</item>
+        <item>Достигнут верх диапазона</item>
+        <item>Достигнут низ диапазона</item>
+        <item>RIR не ниже порога</item>
+        <item>Средний RIR ниже порога</item>
+        <item>Результат не растёт</item>
+        <item>Недовыполнение повторов</item>
+        <item>Первое выполнение упражнения</item>
+        <item>Изменилась масса тела</item>
+        <item>Высокая усталость</item>
+        <item>Пропуски занятий подряд</item>
+        <item>Недостаточно наблюдений</item>
+    </string-array>
+    <string-array name="progression_reasons">
+        <item>Отмечен дискомфорт. Проверьте упражнение перед продолжением.</item>
+        <item>Нагрузка зафиксирована вручную.</item>
+        <item>Выбрано поддержание нагрузки.</item>
+        <item>Мало подтверждённых наблюдений.</item>
+        <item>В последнем занятии есть неподтверждённые подходы.</item>
+        <item>Последнее выполнение ниже плана по повторам или весу.</item>
+        <item>Верхняя граница повторений ещё не достигнута.</item>
+        <item>В последнем занятии не указан RIR.</item>
+        <item>Запас повторений ниже условия повышения.</item>
+        <item>Отмечена высокая усталость.</item>
+        <item>Несколько занятий подряд ниже плана.</item>
+        <item>После пропусков предложено повторить нагрузку.</item>
+        <item>Условия стратегии выполнены.</item>
+        <item>Сработало пользовательское правило.</item>
+        <item>Правила одного приоритета дают разные решения. План сохранён.</item>
+        <item>Этап определяется числом состоявшихся выполнений.</item>
+        <item>Выбрана разгрузка пользователем.</item>
+        <item>Допустимый шаг отсутствует или достигнут предел.</item>
+        <item>Ни одно пользовательское правило не подошло.</item>
+    </string-array>
+    <string-array name="progression_bindings">
+        <item>Общие</item>
+        <item>Программа</item>
+        <item>Участник</item>
+        <item>Упражнение</item>
+        <item>Упражнение участника</item>
+    </string-array>
+    <string-array name="progression_choices">
+        <item>Принято</item>
+        <item>Оставлено</item>
+        <item>Изменено вручную</item>
+    </string-array>
+    <string name="preferences_restored">Настройки восстановлены. Выберите папку Markdown снова.</string>
+</resources>
