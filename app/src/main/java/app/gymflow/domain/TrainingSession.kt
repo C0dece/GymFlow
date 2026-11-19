@@ -125,6 +125,7 @@ data class TrainingSession(
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val switchedProfileId: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val scheduledFor: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val workoutNotes: List<WorkoutNote> = emptyList(),
 ) : Document {
     constructor(title: String, date: String, participants: List<Profile>) : this(
         title = title, date = date, workouts = participants.map { ParticipantWorkout(profile = it) },

@@ -31,6 +31,8 @@
     <string name="conflict_explanation">GymFlow сохранит заменяемый текст в резервной копии. Выберите версию для продолжения.</string>
     <string name="continue_training">Продолжить</string>
     <string name="create_backup">Создать копию</string>
+    <string name="notes">Заметки</string>
+    <string name="restore_backup">Восстановить из ZIP</string>
     <string name="cycle_day">День цикла %1$d</string>
     <string name="cycle_interval">Интервал в днях</string>
     <string name="cycle_start">Начало цикла (ГГГГ-ММ-ДД)</string>
@@ -65,7 +67,6 @@
     <string name="feeling_value">Самочувствие: %1$d из 5</string>
     <string name="finish">Завершить</string>
     <string name="finish_prompt">Завершить тренировку?</string>
-    <string name="first_training">Добавляйте упражнения и записывайте подходы по ходу занятия.</string>
     <string name="flex_cycle">Гибкий цикл</string>
     <string name="folder_error">Проверьте доступ к папке в настройках</string>
     <string name="folder_intro">Подключите папку, чтобы читать и сохранять тренировки в Obsidian.</string>
@@ -163,7 +164,7 @@
     <string name="skip_exercise">Пропустить упражнение</string>
     <string name="sun">Вс</string>
     <string name="switch_folder">Сменить папку</string>
-    <string name="switch_folder_help">Программа откроет данные новой папки. Чтобы вернуться к текущим локальным записям, выберите эту папку снова.</string>
+    <string name="switch_folder_help">После переноса или переименования выберите ту же папку с файлом gymflow-vault.md. GymFlow продолжит работу с её локальной копией и очередью.</string>
     <string name="system_theme">Системная</string>
     <string name="theme">Тема</string>
     <string name="thu">Чт</string>

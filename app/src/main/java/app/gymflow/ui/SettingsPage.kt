@@ -37,13 +37,16 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) model.export(uri, backups)
     }
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.restore(uri)
+    }
     BackHandler(catalog) { catalog = false }
     if (catalog) {
         Catalog(library, model) { catalog = false }
         return
     }
-    val conflicts = library.records.filter { it.conflict != null }
-    val pending = library.records.count { it.pending }
+    val conflicts = library.records.filter { it.conflict != null || it.localOnly }
+    val pending = library.records.count { it.pending && !it.localOnly }
     val path = if (prefs.folder.isBlank()) null else runCatching {
         DocumentsContract.getTreeDocumentId(prefs.folder.toUri()).substringAfter(':')
     }.getOrDefault(prefs.folder)
@@ -76,12 +79,14 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
                     is MovementSkill -> doc.name
                     is MovementTrack -> doc.role.label
                     is SkillAttempt -> doc.measure.label
+                    is SportNote -> doc.title
                     null -> row.id
                 }
                 HorizontalDivider()
                 Text(name, style = MaterialTheme.typography.titleMedium)
-                Muted(row.conflict.orEmpty())
-                TextButton(onClick = { resolve = row.id }) { Text(stringResource(R.string.resolve)) }
+                Muted(if (row.localOnly) "Хранится на устройстве" else row.conflict.orEmpty())
+                if (row.localOnly) TextButton(onClick = { model.resolve(row.id, true) }) { Text("Выгрузить в папку") }
+                else TextButton(onClick = { resolve = row.id }) { Text(stringResource(R.string.resolve)) }
             }
         }
         CardBlock {
@@ -131,6 +136,9 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { backups = false; export.launch("GymFlow.zip") }) { Text(stringResource(R.string.export_markdown)) }
                 OutlinedButton(onClick = { backups = true; export.launch("GymFlow-backup.zip") }) { Text(stringResource(R.string.create_backup)) }
+                OutlinedButton(onClick = { restore.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) {
+                    Text(stringResource(R.string.restore_backup))
+                }
             }
         }
     }
@@ -158,16 +166,25 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
         dismissButton = { TextButton(onClick = { switchFolder = false }) { Text(stringResource(R.string.cancel)) } },
     )
     resolve?.let { id ->
+        val missing = library.records.find { it.id == id }?.conflict == missingFile
         var useLocal by rememberSaveable(id) { mutableStateOf<Boolean?>(null) }
         val cancel = { resolve = null }
         EditorSheet(stringResource(R.string.resolve), cancel) {
-            Muted(stringResource(R.string.conflict_explanation))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(useLocal == true, { useLocal = true }, label = { Text(stringResource(R.string.local_version)) })
-                FilterChip(useLocal == false, { useLocal = false }, label = { Text(stringResource(R.string.folder_version)) })
+            if (missing) {
+                Muted("Локальная копия сохранена. Восстановите файл или подтвердите его удаление из папки.")
+                Button(onClick = { model.resolve(id, true); cancel() }, modifier = Modifier.fillMaxWidth()) { Text("Восстановить файл") }
+                OutlinedButton(onClick = { model.keepOnlyOnDevice(id); cancel() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Оставить только на устройстве")
+                }
+            } else {
+                Muted(stringResource(R.string.conflict_explanation))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(useLocal == true, { useLocal = true }, label = { Text(stringResource(R.string.local_version)) })
+                    FilterChip(useLocal == false, { useLocal = false }, label = { Text(stringResource(R.string.folder_version)) })
+                }
+                Button(onClick = { useLocal?.let { model.resolve(id, it) }; cancel() },
+                    enabled = useLocal != null, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.apply)) }
             }
-            Button(onClick = { useLocal?.let { model.resolve(id, it) }; cancel() },
-                enabled = useLocal != null, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.apply)) }
         }
     }
 }
@@ -217,7 +234,7 @@ private fun DefaultEditor(prefs: Preferences, close: () -> Unit, save: (Preferen
         Field(step, stringResource(R.string.weight_step, unitText(prefs.unit)), { step = it }, keyboard = KeyboardType.Decimal)
         Field(weight, stringResource(R.string.weight_unit, unitText(prefs.unit)), { weight = it }, keyboard = KeyboardType.Decimal)
         Field(sets, stringResource(R.string.set_count), { sets = it }, keyboard = KeyboardType.Number)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AdaptivePair {
             Field(low, stringResource(R.string.min_reps), { low = it }, Modifier.weight(1f), KeyboardType.Number)
             Field(high, stringResource(R.string.max_reps), { high = it }, Modifier.weight(1f), KeyboardType.Number)
         }

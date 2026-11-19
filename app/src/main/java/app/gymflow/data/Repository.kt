@@ -14,6 +14,7 @@ import java.io.IOException
 import java.io.File
 import java.time.LocalDate
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -23,6 +24,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class SyncStatus(val checking: Boolean = false, val issues: List<String> = emptyList())
+const val missingFile = "Файл исчез из папки"
 
 data class Library(
     val scope: String = "",
@@ -30,6 +32,7 @@ data class Library(
     val documents: List<Document> = emptyList(),
     val loaded: Boolean = false,
     val unreadable: Int = 0,
+    val workoutComments: Map<String, String> = emptyMap(),
 ) {
     val sessions = documents.filterIsInstance<Session>().sortedWith(newestSessionFirst)
     val programs = documents.filterIsInstance<Program>().sortedBy { it.title }
@@ -42,6 +45,7 @@ data class Library(
     val attempts = documents.filterIsInstance<SkillAttempt>().sortedByDescending { it.date }
     val policies = documents.filterIsInstance<ProgressionPolicy>()
     val reviews = documents.filterIsInstance<ProgressionReview>().sortedByDescending { it.date }
+    val notes = documents.filterIsInstance<SportNote>().filterNot { it.deleted }
 
     val activeSessions = sessions.filter { it.status == SessionStatus.ACTIVE }.sortedByDescending { it.started }
     fun active() = activeSessions.firstOrNull()
@@ -51,19 +55,25 @@ data class Library(
 class Repository(private val context: Context, private val journal: Journal, val settings: Settings) {
     private val records = journal.records()
     private val lock = Mutex()
+    private var scannedVault: Pair<String, String>? = null
+    private var duplicateIds = emptySet<String>()
     private val syncStatus = MutableStateFlow(SyncStatus())
     val status = syncStatus.asStateFlow()
 
-    val library = settings.values.map { it.folder }.distinctUntilChanged().flatMapLatest { scope ->
+    val library = settings.values.map { it.scope }.distinctUntilChanged().flatMapLatest { scope ->
         flow {
-            var cache = emptyMap<String, Pair<String, Document?>>()
+            var cache = emptyMap<String, Pair<String, MarkdownDocument?>>()
             records.observe(scope).collect { rows ->
                 cache = rows.associate { row ->
-                    val parsed = cache[row.id]?.takeIf { it.first == row.markdown } ?: (row.markdown to decodedOrNull(row))
+                    val parsed = cache[row.id]?.takeIf { it.first == row.markdown } ?: (row.markdown to parsedOrNull(row))
                     row.id to parsed
                 }
                 val available = cache.values.mapNotNull { it.second }
-                emit(Library(scope, rows, available, loaded = true, unreadable = rows.size - available.size))
+                val comments = available.mapNotNull {
+                    if (it.document is Session && it.freeText.isNotBlank()) it.document.id to it.freeText else null
+                }.toMap()
+                emit(Library(scope, rows, available.map { it.document }, loaded = true,
+                    unreadable = rows.size - available.size, workoutComments = comments))
             }
         }
     }.catch { failure ->
@@ -84,8 +94,9 @@ class Repository(private val context: Context, private val journal: Journal, val
         return document
     }
     private fun decoded(row: Record) = parsed(row).document
-    private fun decodedOrNull(row: Record): Document? = try {
-        decoded(row)
+    private fun decodedOrNull(row: Record): Document? = parsedOrNull(row)?.document
+    private fun parsedOrNull(row: Record): MarkdownDocument? = try {
+        parsed(row)
     } catch (error: IllegalArgumentException) {
         Log.w("GymFlow", "document_parse_error category=${error.javaClass.simpleName}")
         null
@@ -94,7 +105,7 @@ class Repository(private val context: Context, private val journal: Journal, val
         null
     }
     private fun folder(scope: String) = SafFolder(context, scope.toUri())
-    private val locations = listOf("Тренировки", "Программы", "Упражнения", "Участники", "Прогрессия", "Движения")
+    private val locations = listOf("Тренировки", "Программы", "Упражнения", "Участники", "Прогрессия", "Движения", "Заметки")
     private fun location(doc: Document) = when (doc) {
         is Session -> locations[0]
         is Program -> locations[1]
@@ -102,6 +113,7 @@ class Repository(private val context: Context, private val journal: Journal, val
         is Profile -> locations[3]
         is ProgressionPolicy, is ProgressionReview -> locations[4]
         is MovementFamily, is MovementTrack, is MovementSkill, is SkillAttempt -> locations[5]
+        is SportNote -> locations[6]
     }
 
     private suspend fun <T> exclusive(action: suspend () -> T): T = withContext(Dispatchers.IO) {
@@ -110,19 +122,53 @@ class Repository(private val context: Context, private val journal: Journal, val
 
     suspend fun connect(uri: Uri) {
         exclusive {
-            val scope = uri.toString()
+            val path = uri.toString()
             context.contentResolver.takePersistableUriPermission(
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-            val old = settings.values.first().folder
-            if (old.isBlank() && records.folders().isEmpty()) {
-                journal.withTransaction {
-                    records.all("").forEach { records.put(it.copy(scope = scope)) }
-                }
-            }
-            settings.selectFolder(scope)
+            val old = settings.values.first()
+            val preferred = old.vaultId.takeIf { path == old.folder && it.isNotBlank() }
+            val id = requireNotNull(folder(path).vaultId(create = true, preferred = preferred))
+            bind(path, id, old)
         }
         refresh()
+    }
+
+    private suspend fun bind(path: String, id: String, old: Preferences) {
+        val previous = when {
+            old.folder.isBlank() -> ""
+            old.vaultId.isBlank() && path == old.folder -> old.scope
+            else -> null
+        }
+        if (previous != null) journal.withTransaction {
+            records.all(previous).forEach { row ->
+                if (records.get(id, row.id) == null) records.put(row.copy(scope = id))
+            }
+        }
+        settings.selectFolder(path, id)
+    }
+
+    private fun verifiedFolder(prefs: Preferences): SafFolder {
+        val folder = folder(prefs.folder)
+        check(prefs.vaultId.isNotBlank() && folder.vaultId(create = false) == prefs.vaultId) {
+            "Папка GymFlow недоступна или её идентификатор изменился. Выберите папку повторно."
+        }
+        return folder
+    }
+
+    private fun managedNodes(folder: SafFolder): List<Node> {
+        val root = folder.children(folder.root)
+        val result = root.toMutableList()
+        val queue = ArrayDeque(root.filter { it.folder && it.name in locations })
+        val visited = hashSetOf(folder.root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (!visited.add(node.id)) continue
+            val children = folder.children(node.id)
+            result.addAll(children)
+            queue.addAll(children.filter { it.folder && !it.name.startsWith('.') })
+        }
+        return result
     }
 
     private fun migrationFolder(scope: String) = File(context.filesDir, "markdown-backups/" + digest(scope))
@@ -156,12 +202,12 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun save(document: Document) = exclusive {
-        val scope = settings.values.first().folder
+        val scope = settings.values.first().scope
         journal.withTransaction { stage(scope, document) }
     }
 
     suspend fun update(change: (Library) -> List<Document>) = exclusive {
-        val scope = settings.values.first().folder
+        val scope = settings.values.first().scope
         val changed = journal.withTransaction {
             val rows = records.all(scope)
             val library = Library(scope, rows, rows.mapNotNull(::decodedOrNull))
@@ -171,7 +217,7 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun editSession(id: String, extras: List<Document> = emptyList(), edit: (Session) -> Session) = exclusive {
-        val scope = settings.values.first().folder
+        val scope = settings.values.first().scope
         journal.withTransaction {
             val session = records.get(scope, id)?.let(::decoded) as? Session ?: error("Тренировка не найдена")
             check(!session.status.let { it == SessionStatus.COMPLETED || it == SessionStatus.SKIPPED }) {
@@ -191,7 +237,7 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun correctResult(sessionId: String, workoutId: String, exerciseId: String, original: SetEntry?, result: SetEntry) = exclusive {
-        val scope = settings.values.first().folder
+        val scope = settings.values.first().scope
         journal.withTransaction {
             val session = records.get(scope, sessionId)?.let(::decoded) as? Session ?: error("Тренировка не найдена")
             val workout = session.allWorkouts.firstOrNull { it.id == workoutId } ?: error("Тренировка не найдена")
@@ -219,11 +265,19 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun editDocument(id: String, transform: (Document) -> Document) = exclusive {
-        val scope = settings.values.first().folder
+        val scope = settings.values.first().scope
         val original = records.get(scope, id)?.let(::decoded) ?: error("Запись не найдена")
         val replacement = transform(original)
         require(replacement.id == id)
         if (stage(scope, replacement)) setOf(id) else emptySet()
+    }
+
+    suspend fun updateDocument(scope: String, id: String, transform: (Document?) -> Document) = exclusive {
+        check(settings.values.first().scope == scope) { "Папка изменилась. Откройте заметку снова." }
+        val current = records.get(scope, id)?.let(::decoded)
+        val next = transform(current)
+        require(next.id == id)
+        stage(scope, next)
     }
 
     suspend fun schedule(today: LocalDate = LocalDate.now()) {
@@ -295,14 +349,20 @@ class Repository(private val context: Context, private val journal: Journal, val
     private data class External(val node: Node, val markdown: String, val document: Document)
 
     suspend fun refresh() = exclusive {
-        val scope = settings.values.first().folder
-        if (scope.isBlank()) return@exclusive
+        var prefs = settings.values.first()
+        if (prefs.folder.isBlank()) return@exclusive
         syncStatus.value = SyncStatus(checking = true)
+        scannedVault = null
         val issues = mutableListOf<String>()
         try {
-            val folder = folder(scope)
-            val root = folder.children(folder.root)
-            val nodes = root + root.filter { it.folder && it.name in locations }.flatMap { folder.children(it.id) }
+            if (prefs.vaultId.isBlank()) {
+                val id = requireNotNull(folder(prefs.folder).vaultId(create = true))
+                bind(prefs.folder, id, prefs)
+                prefs = prefs.copy(vaultId = id)
+            }
+            val scope = prefs.scope
+            val folder = verifiedFolder(prefs)
+            val nodes = managedNodes(folder)
             val existing = records.all(scope).associateBy { it.id }
             val sources = existing.values.mapNotNull { row -> row.source?.let { it to row } }.toMap()
             val unreadable = mutableSetOf<String>()
@@ -346,15 +406,19 @@ class Repository(private val context: Context, private val journal: Journal, val
                         else -> record.copy(markdown = ext.markdown, expected = hash,
                             source = ext.node.id, backup = record.markdown, conflict = null)
                     }
-                    if (record != next) records.put(next)
+                    val reattached = next.copy(localOnly = false)
+                    if (record != reattached) records.put(reattached)
                 }
-                existing.values.filter { it.id !in remote && it.source != null }.forEach { row ->
+                existing.values.filter { it.id !in remote && it.source != null && !it.localOnly }.forEach { row ->
                     val source = row.source ?: return@forEach
                     if (source !in preparedEmpty) {
-                        records.put(row.copy(conflict = if (source in unreadable) "Файл повреждён или заменён" else "Файл исчез из папки"))
+                        val conflict = if (source in unreadable) "Файл нечитаем, повреждён или заменён" else missingFile
+                        if (row.conflict != conflict) records.put(row.copy(conflict = conflict))
                     }
                 }
             }
+            duplicateIds = remote.filterValues { it.size > 1 }.keys
+            scannedVault = prefs.folder to scope
         } catch (failure: Exception) {
             if (failure is kotlinx.coroutines.CancellationException) throw failure
             Log.w("GymFlow", "saf_read_error category=${failure.javaClass.simpleName}")
@@ -365,11 +429,19 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun flush(ids: Set<String>? = null) = exclusive {
-        val scope = settings.values.first().folder
-        if (scope.isBlank()) return@exclusive
-        val pending = records.pending(scope).filter { it.conflict == null && (ids == null || it.id in ids) }
+        val prefs = settings.values.first()
+        if (prefs.folder.isBlank() || prefs.vaultId.isBlank()) return@exclusive
+        val scope = prefs.scope
+        if (scannedVault != (prefs.folder to scope)) return@exclusive
+        val pending = records.pending(scope).filter { it.conflict == null && it.id !in duplicateIds && (ids == null || it.id in ids) }
         if (pending.isEmpty()) return@exclusive
-        val folder = folder(scope)
+        val folder = try {
+            verifiedFolder(prefs)
+        } catch (failure: Exception) {
+            if (failure is kotlinx.coroutines.CancellationException) throw failure
+            syncStatus.value = SyncStatus(issues = listOf("Папка недоступна. Изменения сохранены в очереди."))
+            return@exclusive
+        }
         val issues = mutableListOf<String>()
         for (row in pending) {
             if (decodedOrNull(row) == null) {
@@ -381,8 +453,7 @@ class Repository(private val context: Context, private val journal: Journal, val
             } catch (failure: Exception) {
                 if (failure is kotlinx.coroutines.CancellationException) throw failure
                 Log.w("GymFlow", "saf_write_error category=${failure.javaClass.simpleName}")
-                issues.add(failure.message ?: "Запись не удалась")
-                break
+                if (issues.size < 12) issues.add(failure.message ?: "Запись не удалась")
             }
         }
         if (issues.isNotEmpty()) syncStatus.value = SyncStatus(issues = issues)
@@ -437,34 +508,32 @@ class Repository(private val context: Context, private val journal: Journal, val
     }
 
     suspend fun resolve(id: String, keepLocal: Boolean) = exclusive {
-        val scope = settings.values.first().folder
+        val prefs = settings.values.first()
+        val scope = prefs.scope
         val row = records.get(scope, id) ?: return@exclusive
-        check(row.conflict != null)
-        val folder = folder(scope)
-        val roots = folder.children(folder.root)
-        val all = roots + roots.filter { it.folder && it.name in locations }.flatMap { folder.children(it.id) }
+        check(row.conflict != null || row.localOnly)
+        val folder = verifiedFolder(prefs)
+        val all = managedNodes(folder)
         val node = all.singleOrNull { !it.folder && it.id == row.source }
         val matches = all.filter { !it.folder && it.name.endsWith(".md", true) }.filter {
             try {
                 Markdown.read(folder.read(it.id))?.document?.id == id
-            } catch (_: IllegalArgumentException) {
-                false
-            } catch (_: IOException) {
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
                 false
             }
         }
         check(matches.size <= 1) { "Уберите дублирующий файл из папки и обновите данные" }
-        val source = node?.id ?: matches.singleOrNull()?.id
+        val source = matches.singleOrNull()?.id ?: node?.id
         val raw = source?.let(folder::read)
         if (keepLocal) {
             val external = raw?.let { runCatching { Markdown.read(it) }.getOrNull() }
             check(external == null || external.document.id == id) { "Файл принадлежит другой записи" }
-            val notes = external?.freeText?.takeIf { it.isNotBlank() }
             val local = requireNotNull(Markdown.read(row.markdown))
-            val mergedNotes = listOfNotNull(local.freeText.takeIf { it.isNotBlank() }, notes).distinct().joinToString("\n\n")
-            val text = Markdown.write(local.document, mergedNotes, external?.extraYaml.orEmpty() + local.extraYaml)
+            val text = Markdown.write(local.document, external?.freeText ?: local.freeText,
+                external?.extraYaml ?: local.extraYaml)
             require(text.toByteArray(Charsets.UTF_8).size <= maxDocumentBytes) { "Файл превышает 512 КиБ" }
-            val next = row.copy(markdown = text, pending = true,
+            val next = row.copy(markdown = text, pending = true, localOnly = false,
                 source = source, expected = raw?.let(::digest), backup = raw ?: row.backup, inFlight = null, conflict = null)
             records.put(next)
             flushRow(folder, next)
@@ -472,16 +541,30 @@ class Repository(private val context: Context, private val journal: Journal, val
             val remote = requireNotNull(raw?.let(Markdown::read)) { "Внешняя версия недоступна" }
             check(remote.document.id == id)
             records.put(row.copy(markdown = raw, source = source, expected = digest(raw), backup = row.markdown,
-                pending = false, inFlight = null, conflict = null))
+                pending = false, inFlight = null, conflict = null, localOnly = false))
         }
     }
 
+    suspend fun keepOnlyOnDevice(id: String) = exclusive {
+        val scope = settings.values.first().scope
+        val row = records.get(scope, id) ?: return@exclusive
+        check(row.conflict == missingFile) { "Статус файла изменился. Обновите данные." }
+        records.put(row.copy(localOnly = true, conflict = null))
+    }
+
     suspend fun export(uri: Uri, backups: Boolean) = exclusive {
-        val scope = settings.values.first().folder
+        val prefs = settings.values.first()
+        val scope = prefs.scope
         val rows = records.all(scope)
         val stream = context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Экспорт недоступен")
         ZipOutputStream(stream).use { zip ->
-            if (backups) migrationFolder(scope).listFiles().orEmpty().filter { it.extension == "md" }.forEach { file ->
+            if (backups && prefs.vaultId.isNotBlank()) {
+                zip.putNextEntry(ZipEntry(vaultMarker))
+                zip.write("${prefs.vaultId}\n".toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+            if (backups) listOf(scope, prefs.folder).distinct().flatMap { migrationFolder(it).listFiles().orEmpty().toList() }
+                .filter { it.extension == "md" }.distinctBy { it.name }.forEach { file ->
                 zip.putNextEntry(ZipEntry("До миграции/${file.name}"))
                 file.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
@@ -497,6 +580,53 @@ class Repository(private val context: Context, private val journal: Journal, val
                     zip.write(row.backup.toByteArray(Charsets.UTF_8))
                     zip.closeEntry()
                 }
+            }
+        }
+    }
+
+    data class RestoreResult(val restored: Int, val different: Int)
+
+    suspend fun restore(uri: Uri): RestoreResult {
+        refresh()
+        return exclusive {
+            val prefs = settings.values.first()
+            journal.withTransaction {
+                val stream = context.contentResolver.openInputStream(uri) ?: throw IOException("Архив недоступен")
+                val ids = hashSetOf<String>()
+                var restored = 0
+                var different = 0
+                ZipInputStream(stream).use { zip ->
+                    var entries = 0
+                    var bytes = 0L
+                    while (true) {
+                        val entry = zip.nextEntry ?: break
+                        require(++entries <= 30_000) { "Слишком много файлов в архиве" }
+                        if (!entry.isDirectory) {
+                            val raw = readMarkdownStream(zip)
+                            bytes += raw.toByteArray(Charsets.UTF_8).size
+                            require(bytes <= 256L * 1024 * 1024) { "Архив слишком большой" }
+                            val path = entry.name.split('/')
+                            if (path.size == 2 && path[0] in locations && path[1].endsWith(".md")) {
+                                val document = requireNotNull(Markdown.read(raw)) { "В архиве есть нечитаемый документ" }.document
+                                val id = document.id
+                                require(path[1] == "$id.md" && ids.add(id)) { "Имя файла или ID в архиве некорректны" }
+                                val existing = records.get(prefs.scope, id)
+                                when {
+                                    existing == null -> {
+                                        records.put(Record(prefs.scope, id, raw))
+                                        restored++
+                                    }
+                                    existing.markdown != raw -> different++
+                                }
+                            }
+                        } else {
+                            check(zip.read() == -1) { "Некорректная папка в архиве" }
+                        }
+                        zip.closeEntry()
+                    }
+                }
+                require(ids.isNotEmpty()) { "В архиве нет документов GymFlow" }
+                RestoreResult(restored, different)
             }
         }
     }

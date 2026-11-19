@@ -58,7 +58,7 @@ fun History(library: Library, prefs: Preferences, open: (String) -> Unit, repeat
     ) {
         item {
             Text(if (stats) stringResource(R.string.progress) else stringResource(R.string.diary), style = MaterialTheme.typography.headlineLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(!stats, { stats = false }, label = { Text(stringResource(R.string.history)) })
                 FilterChip(stats, { stats = true }, label = { Text(stringResource(R.string.progress)) }, modifier = Modifier.testTag("progress_tab"))
             }
@@ -125,7 +125,8 @@ fun History(library: Library, prefs: Preferences, open: (String) -> Unit, repeat
                     Muted(shortDate(item.date))
                     SectionTitle(workout.templateTitle ?: item.title)
                     Muted(stringResource(R.string.workout_summary, workout.exercises.size, workout.completed))
-                    if (item.notes.isNotBlank()) Text(item.notes, maxLines = 3)
+                    if (item.workoutNotes.isNotEmpty()) Muted("Заметок: ${item.workoutNotes.size}")
+                    if (item.notes.isNotBlank()) Text(item.notes, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     if (!parked && item.status == SessionStatus.COMPLETED) {
                         TextButton(onClick = { repeat(item.id) }, modifier = Modifier.testTag("repeat_history")) {
                             Text(stringResource(R.string.repeat_workout))

@@ -37,6 +37,7 @@ fun PlanPreview(
     var personId by rememberSaveable { mutableStateOf(draft.defaultWorkout.profile.id) }
     var editing by remember { mutableStateOf<String?>(null) }
     var variation by remember { mutableStateOf<String?>(null) }
+    var showNotes by rememberSaveable { mutableStateOf(false) }
     val current = draft.workout(personId) ?: draft.workouts.first()
     val engine by rememberEngine(library)
     val program = library.programs.find { p -> p.days.any { it.id == current.templateId } }?.id ?: draft.programId
@@ -59,7 +60,7 @@ fun PlanPreview(
     }
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.view_plan)) },
+            TopAppBar(title = { BarTitle(stringResource(R.string.view_plan)) },
                 navigationIcon = { IconButton(onClick = back) { Symbol(R.drawable.ic_back, description = stringResource(R.string.back)) } })
         },
         bottomBar = {
@@ -67,7 +68,7 @@ fun PlanPreview(
                 Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 18.dp, vertical = 8.dp)) {
                     Button(onClick = { model.confirmPlan(original, draft, true, start) },
                         modifier = Modifier.fillMaxWidth().testTag("confirm_start_plan")) { Text(stringResource(R.string.start_workout)) }
-                    if (draft != original) TextButton(onClick = { model.confirmPlan(original, draft, false) { back() } },
+                    if (draft.copy(workoutNotes = original?.workoutNotes.orEmpty()) != original) TextButton(onClick = { model.confirmPlan(original, draft, false) { back() } },
                         modifier = Modifier.fillMaxWidth().testTag("save_plan")) { Text(stringResource(R.string.save_preview)) }
                 }
             }
@@ -76,6 +77,10 @@ fun PlanPreview(
         ScreenColumn(Modifier.padding(padding).consumeWindowInsets(padding).testTag("plan_preview")) {
             Text(draft.title, style = MaterialTheme.typography.headlineLarge)
             Muted(shortDate(draft.date))
+            if (original != null) {
+                TextButton(onClick = { showNotes = true }, modifier = Modifier.testTag("plan_notes")) { Text("Заметки к тренировке") }
+                if (showNotes) WorkoutNotesSheet(original, library, model) { showNotes = false }
+            }
             if (draft.workouts.size > 1) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     draft.workouts.forEach { row ->

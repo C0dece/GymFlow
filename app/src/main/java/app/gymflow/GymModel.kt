@@ -10,6 +10,8 @@ import app.gymflow.domain.*
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import android.provider.OpenableColumns
 import kotlinx.coroutines.channels.Channel
@@ -24,6 +26,8 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
     val message = MutableStateFlow<String?>(null)
     private val commands = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val flush = Channel<Unit>(Channel.CONFLATED)
+    private var refreshQueued = false
+    private var noteFlush: Job? = null
 
     init {
         viewModelScope.launch { for (command in commands) runCommand(command) }
@@ -46,14 +50,68 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun refresh() { commands.trySend { repo.maintain() } }
+    fun refresh() {
+        if (refreshQueued) return
+        refreshQueued = true
+        commands.trySend {
+            try { repo.maintain() } finally { refreshQueued = false }
+        }
+    }
     fun connect(uri: Uri) { commands.trySend { repo.connect(uri); repo.maintain() } }
     fun settings(next: Preferences) { commands.trySend { repo.settings.update(next) } }
     fun resolve(id: String, local: Boolean) { commands.trySend { repo.resolve(id, local) } }
+    fun keepOnlyOnDevice(id: String) { commands.trySend { repo.keepOnlyOnDevice(id) } }
     fun export(uri: Uri, backups: Boolean) {
         commands.trySend {
             repo.export(uri, backups)
             message.value = app.getString(R.string.exported)
+        }
+    }
+    fun restore(uri: Uri) {
+        commands.trySend {
+            val result = repo.restore(uri)
+            repo.maintain()
+            message.value = "Восстановлено: ${result.restored}. Отличающихся версий оставлено в архиве: ${result.different}."
+        }
+    }
+
+    private fun writeNote(scope: String, id: String, result: (String?) -> Unit, change: (Document?) -> Document) {
+        commands.trySend {
+            try {
+                if (repo.updateDocument(scope, id, change)) {
+                    noteFlush?.cancel()
+                    noteFlush = viewModelScope.launch {
+                        delay(650)
+                        flush.trySend(Unit)
+                    }
+                }
+                result(null)
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                result(failure.localizedMessage ?: app.getString(R.string.save_failed))
+            }
+        }
+    }
+
+    fun saveNote(scope: String, previous: SportNote?, next: SportNote, result: (String?) -> Unit) {
+        writeNote(scope, next.id, result) { current ->
+            check(current == previous || current == next) { "Заметка уже изменилась. Скопируйте черновик и откройте её снова." }
+            next
+        }
+    }
+
+    fun saveWorkoutNote(scope: String, sessionId: String, previous: WorkoutNote?, next: WorkoutNote?, result: (String?) -> Unit) {
+        val id = requireNotNull(next ?: previous).id
+        writeNote(scope, sessionId, result) { document ->
+            val session = document as? Session ?: error("Тренировка недоступна")
+            val notes = session.workoutNotes
+            val current = notes.find { it.id == id }
+            check(current == previous || current == next) { "Заметка уже изменилась. Скопируйте черновик и откройте её снова." }
+            session.copy(workoutNotes = when {
+                next == null -> notes.filterNot { it.id == id }
+                current == null -> notes + next
+                else -> notes.map { if (it.id == id) next else it }
+            })
         }
     }
 
@@ -354,7 +412,8 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
 
     fun confirmPlan(original: Session?, draft: Session, start: Boolean, open: (String) -> Unit) = create(open) { state ->
         val existing = state.sessions.find { it.id == draft.id }
-        check(existing == original && (existing == null || existing.status == SessionStatus.PLANNED)) {
+        check(existing?.copy(workoutNotes = emptyList()) == original?.copy(workoutNotes = emptyList()) &&
+            (existing == null || existing.status == SessionStatus.PLANNED)) {
             app.getString(R.string.plan_changed)
         }
         val people = state.profiles.map { it.id }.toSet()
@@ -362,7 +421,8 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         val newExercises = draft.workouts.flatMap { it.exercises }.map { it.exercise }.distinctBy { it.id }.filter { it.id !in catalog }
         val cycle = draft.workouts.any { it.cycleSlot != null } ||
             state.programs.any { it.id == draft.programId && it.completionCycle != null }
-        val planned = if (start && cycle) draft.onCycleVisit(LocalDate.now()) else draft
+        val withNotes = draft.copy(workoutNotes = existing?.workoutNotes.orEmpty())
+        val planned = if (start && cycle) withNotes.onCycleVisit(LocalDate.now()) else withNotes
         (if (start) planned.start() else planned) to (draft.participants.filter { it.id !in people } + newExercises)
     }
 

@@ -34,21 +34,23 @@ fun ProgressionScreen(library: Library, model: GymModel, back: () -> Unit, prepa
     fun leave() { if (editing) editing = false else back() }
     BackHandler(editing) { editing = false }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(stringResource(if (editing) R.string.configure_progression else R.string.progression)) },
+        TopAppBar(title = { BarTitle(stringResource(if (editing) R.string.configure_progression else R.string.progression)) },
             navigationIcon = { IconButton(onClick = ::leave, modifier = Modifier.testTag("progression_back")) { Symbol(R.drawable.ic_back, description = stringResource(R.string.back)) } })
     }) { padding ->
         ScreenColumn(Modifier.padding(padding).consumeWindowInsets(padding).testTag("progression_page")) {
             if (editing) {
                 PolicyEditor(library, person, exercise, { editing = false }) { model.save(it); editing = false }
             } else {
-                Button(onClick = { editing = true }, modifier = Modifier.testTag("configure_progression")) {
-                    Text(stringResource(R.string.configure_progression))
-                }
-                OutlinedButton(onClick = {
-                    prepare(library.sessions.filter { it.status == SessionStatus.PLANNED }.minByOrNull { it.date }?.id)
-                }) { Text(stringResource(R.string.prepare_training)) }
-                OutlinedButton(onClick = movements, modifier = Modifier.testTag("open_movements")) {
-                    Text("Движения и навыки")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { editing = true }, modifier = Modifier.testTag("configure_progression")) {
+                        Text(stringResource(R.string.configure_progression))
+                    }
+                    OutlinedButton(onClick = {
+                        prepare(library.sessions.filter { it.status == SessionStatus.PLANNED }.minByOrNull { it.date }?.id)
+                    }) { Text(stringResource(R.string.prepare_training)) }
+                    OutlinedButton(onClick = movements, modifier = Modifier.testTag("open_movements")) {
+                        Text("Движения и навыки")
+                    }
                 }
                 if (person != null) Choice(person, people, { it.name }, { profileId = it.id }, "progression_profile")
                 if (exercise != null) Choice(exercise, library.exercises, { it.name }, { exerciseId = it.id }, "progression_exercise")

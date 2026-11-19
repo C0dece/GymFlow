@@ -27,6 +27,7 @@ fun ExerciseCard(
     editable: Boolean, focusSet: String?, actions: @Composable () -> Unit,
     toggle: (SetEntry) -> Unit, edit: (SetEntry) -> Unit, rir: (Int) -> Unit, addSet: () -> Unit,
     correcting: Boolean = false,
+    header: @Composable ColumnScope.() -> Unit = {},
 ) {
     val exercise = entry.exercise
     val previous = remember(library.sessions, exercise.id, profile.id) {
@@ -39,6 +40,7 @@ fun ExerciseCard(
         }
     }
     ScreenColumn(Modifier.testTag("exercise_card_${entry.id}")) {
+        header()
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(exercise.name, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("exercise_title"))
@@ -164,7 +166,7 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
             Choice(technique, listOf(null) + Technique.entries, { it?.label ?: "Без отметки техники" },
                 { technique = it }, "set_technique")
             if (!newResult && set.status == SetStatus.PLANNED) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AdaptivePair {
                     Field(minReps, "План от", { minReps = it }, Modifier.weight(1f), KeyboardType.Number)
                     Field(maxReps, "План до", { maxReps = it }, Modifier.weight(1f), KeyboardType.Number)
                 }

@@ -13,6 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.gymflow.GymModel
 import app.gymflow.R
@@ -21,7 +22,7 @@ import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 import kotlinx.coroutines.launch
 
-private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE }
+private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE, NOTES }
 
 @Composable
 fun Workout(
@@ -68,7 +69,7 @@ private fun ColumnScope.ParticipantScreen(
     DisposableEffect(Unit) { onDispose { onScreen = false } }
     val latestSession by rememberUpdatedState(session)
     val chooseCurrent by rememberUpdatedState(choose)
-    var sheet by remember { mutableStateOf<Sheet?>(null) }
+    var sheet by rememberSaveable { mutableStateOf<Sheet?>(null) }
     var menu by remember { mutableStateOf(false) }
     var more by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<String?>(null) }
@@ -82,7 +83,6 @@ private fun ColumnScope.ParticipantScreen(
     val exercises = chosen.exercises
     val entry = exercises.getOrNull(pager.currentPage)
     val athlete = entry?.athletes?.single()
-    val trainingBlock = chosen.trainingBlocks.find { it.id == entry?.plan?.blockId }
     val active = session.status == SessionStatus.ACTIVE && !reviewing
     val editable = active && chosen.canEdit
     val canCorrect = session.completedWorkouts(personId).any { it.id == chosen.id }
@@ -167,14 +167,8 @@ private fun ColumnScope.ParticipantScreen(
 
     TopAppBar(
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(chosen.templateTitle ?: session.title, maxLines = 2, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f, fill = false))
-                if (program != null && program.days.isNotEmpty()) {
-                    IconButton(onClick = { open(Sheet.DAY) }, modifier = Modifier.size(36.dp).testTag("title_switch_day")) {
-                        Symbol(R.drawable.ic_program, description = stringResource(R.string.switch_day), modifier = Modifier.size(20.dp))
-                    }
-                }
-            }
+            Text(chosen.templateTitle ?: session.title, maxLines = 2, style = MaterialTheme.typography.titleMedium,
+                overflow = TextOverflow.Ellipsis)
         },
         navigationIcon = { IconButton(onClick = leave) { Symbol(R.drawable.ic_back, description = stringResource(R.string.back)) } },
         actions = {
@@ -191,6 +185,7 @@ private fun ColumnScope.ParticipantScreen(
                     Symbol(R.drawable.ic_more, description = stringResource(R.string.workout_actions))
                 }
                 DropdownMenu(menu, { menu = false }) {
+                    Action("Заметки к тренировке", "workout_notes") { open(Sheet.NOTES) }
                     if (program != null && program.days.isNotEmpty()) {
                         Action(stringResource(R.string.switch_day), "menu_switch_day") { open(Sheet.DAY) }
                     }
@@ -230,6 +225,7 @@ private fun ColumnScope.ParticipantScreen(
             } else {
                 IconButton(onClick = { menu = true }) { Symbol(R.drawable.ic_more, description = stringResource(R.string.workout_actions)) }
                 DropdownMenu(menu, { menu = false }) {
+                    Action("Заметки к тренировке", "workout_notes") { open(Sheet.NOTES) }
                     if (program != null && program.days.isNotEmpty()) {
                         Action(stringResource(R.string.switch_day), "menu_switch_day") { open(Sheet.DAY) }
                     }
@@ -247,20 +243,23 @@ private fun ColumnScope.ParticipantScreen(
     if (!reviewing && session.workouts.size > 1) {
         ParticipantTabs(session.workouts, personId, pager.currentPage, pinned) { choose(it, null) }
     }
-    Column(Modifier.padding(horizontal = 18.dp).padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        if (!editable) Muted(workoutStatus(chosen.status))
-        if (reviewing) Muted(profile.name)
-        if (canCorrect && correcting) Muted(stringResource(R.string.correct_results))
-        if (entry != null) {
-            Text(stringResource(R.string.exercise_progress, pager.currentPage + 1, exercises.size),
-                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+    val context: @Composable (ExerciseEntry?, Int) -> Unit = { current, page ->
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (!editable) Muted(workoutStatus(chosen.status))
+            if (reviewing) Muted(profile.name)
+            if (canCorrect && correcting) Muted(stringResource(R.string.correct_results))
+            if (current != null) {
+                Text(stringResource(R.string.exercise_progress, page + 1, exercises.size),
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+            }
+            chosen.trainingBlocks.find { it.id == current?.plan?.blockId }?.let { Muted(it.name) }
+            if (editable) RestTimer(chosen.restUntil, current?.plan?.restSeconds) { seconds ->
+                edit { it.copy(restUntil = seconds?.let { value -> java.time.Instant.now().plusSeconds(value.toLong()).toString() }) }
+            }
         }
-        if (trainingBlock != null) Muted(trainingBlock.name)
-        if (editable) RestTimer(chosen.restUntil, entry?.plan?.restSeconds) { seconds ->
-            edit { it.copy(restUntil = seconds?.let { value -> java.time.Instant.now().plusSeconds(value.toLong()).toString() }) }
-        }
-        LinearProgressIndicator(progress = { if (total == 0) 0f else completed.toFloat() / total }, modifier = Modifier.fillMaxWidth().height(5.dp))
     }
+    LinearProgressIndicator(progress = { if (total == 0) 0f else completed.toFloat() / total },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).height(4.dp))
     HorizontalPager(
         state = pager, userScrollEnabled = sheet == null && !menu && !more && exercises.size > 1,
         key = { exercises.getOrNull(it)?.id ?: "empty" },
@@ -269,6 +268,7 @@ private fun ColumnScope.ParticipantScreen(
         val current = exercises.getOrNull(page)
         if (current == null) {
             ScreenColumn {
+                if (!editable) context(null, page)
                 Text(stringResource(R.string.empty_workout), style = MaterialTheme.typography.headlineLarge)
                 Muted(stringResource(R.string.empty_workout_body))
                 if (editable) {
@@ -286,6 +286,7 @@ private fun ColumnScope.ParticipantScreen(
             val row = current.athletes.single()
             val focus = row.sets.getOrNull(row.next)?.id.takeIf { editable }
             ExerciseCard(current, latestSession, profile, row, library, editable, focus, correcting = canCorrect && correcting,
+                header = { context(current, page) },
                 actions = {
                     if (page == pager.currentPage) {
                         Box {
@@ -348,9 +349,9 @@ private fun ColumnScope.ParticipantScreen(
     Surface(color = MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 9.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { coroutine.launch { pager.animateScrollToPage(pager.currentPage - 1) } },
-                enabled = pager.currentPage > 0, modifier = Modifier.weight(1f).heightIn(min = 50.dp).testTag("previous_exercise")) {
-                Text(stringResource(R.string.back))
+            OutlinedIconButton(onClick = { coroutine.launch { pager.animateScrollToPage(pager.currentPage - 1) } },
+                enabled = pager.currentPage > 0, modifier = Modifier.size(50.dp).testTag("previous_exercise")) {
+                Symbol(R.drawable.ic_back, description = stringResource(R.string.back))
             }
             val hasNext = pager.currentPage < exercises.lastIndex
             Button(onClick = {
@@ -372,6 +373,7 @@ private fun ColumnScope.ParticipantScreen(
     }
 
     when (sheet) {
+        Sheet.NOTES -> WorkoutNotesSheet(session, library, model, close)
         Sheet.ADD, Sheet.REPLACE -> {
             val replace = sheet == Sheet.REPLACE
             ExerciseEditor(
@@ -494,8 +496,9 @@ private fun ParticipantTabs(workouts: List<ParticipantWorkout>, selected: String
             val current = item.profile.id == selected
             val position = if (item.exercises.isEmpty()) 0 else if (current) page + 1 else item.currentIndex + 1
             Tab(selected = current, onClick = { choose(item.profile.id) }, modifier = Modifier.testTag("participant_$index")) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(item.profile.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+                Column(Modifier.widthIn(max = 240.dp).padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(item.profile.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Muted(if (item.canEdit) stringResource(R.string.participant_progress, position, item.exercises.size, item.remaining)
                         else workoutStatus(item.status))
                     if (current && pinned) Muted(stringResource(R.string.person_pinned))

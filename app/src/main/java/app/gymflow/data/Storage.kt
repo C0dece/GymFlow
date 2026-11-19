@@ -5,14 +5,19 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract as Docs
 import androidx.room.Dao
+import androidx.room.ColumnInfo
 import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import java.io.InputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "documents", primaryKeys = ["scope", "id"])
@@ -26,6 +31,7 @@ data class Record(
     val backup: String? = null,
     val inFlight: String? = null,
     val conflict: String? = null,
+    @ColumnInfo(defaultValue = "0") val localOnly: Boolean = false,
 )
 
 @Dao
@@ -39,11 +45,8 @@ interface Records {
     @Query("SELECT * FROM documents WHERE scope = :scope AND id = :id")
     suspend fun get(scope: String, id: String): Record?
 
-    @Query("SELECT * FROM documents WHERE scope = :scope AND pending")
+    @Query("SELECT * FROM documents WHERE scope = :scope AND pending AND NOT localOnly")
     suspend fun pending(scope: String): List<Record>
-
-    @Query("SELECT DISTINCT scope FROM documents WHERE scope != ''")
-    suspend fun folders(): List<String>
 
     @Query("DELETE FROM documents WHERE scope = :scope AND id = :id")
     suspend fun remove(scope: String, id: String)
@@ -52,9 +55,15 @@ interface Records {
     suspend fun put(record: Record)
 }
 
-@Database(entities = [Record::class], version = 1)
+@Database(entities = [Record::class], version = 2)
 abstract class Journal : RoomDatabase() {
     abstract fun records(): Records
+}
+
+val journalMigration = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE documents ADD COLUMN localOnly INTEGER NOT NULL DEFAULT 0")
+    }
 }
 
 const val maxDocumentBytes = 1024 * 1024 / 2
@@ -88,24 +97,47 @@ class SafFolder(context: Context, private val tree: Uri) {
 
     fun read(id: String): String = readMarkdownFile(resolver, uri(id))
 
+    fun vaultId(create: Boolean, preferred: String? = null): String? {
+        val markers = children(root).filter { it.name == vaultMarker }
+        if (markers.isEmpty() && !create) return null
+        require(markers.size <= 1 && markers.none { it.folder }) { "Неоднозначный идентификатор папки GymFlow" }
+        val existing = markers.singleOrNull()
+        if (existing != null) {
+            val id = read(existing.id).trim()
+            require(runCatching { UUID.fromString(id).toString() }.getOrNull() == id) {
+                "Повреждён идентификатор папки GymFlow"
+            }
+            return id
+        }
+        val id = preferred ?: UUID.randomUUID().toString()
+        val marker = create(root, vaultMarker)
+        write(marker, "$id\n")
+        check(read(marker).trim() == id) { "Не удалось проверить идентификатор папки" }
+        return id
+    }
+
     fun write(id: String, markdown: String) {
         resolver.openOutputStream(uri(id), "wt")?.use { it.write(markdown.toByteArray(Charsets.UTF_8)) }
             ?: throw IOException("Не удалось открыть файл на запись")
     }
 }
 
+internal const val vaultMarker = "gymflow-vault.md"
+
 internal fun readMarkdownFile(resolver: ContentResolver, uri: Uri): String =
-    resolver.openInputStream(uri)?.use { stream ->
-        val bytes = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val count = stream.read(buffer)
-            if (count < 0) break
-            if (bytes.size() + count > maxDocumentBytes) throw IOException("Файл превышает 512 КиБ")
-            bytes.write(buffer, 0, count)
-        }
-        val raw = bytes.toByteArray()
-        val value = raw.toString(Charsets.UTF_8)
-        if (!value.toByteArray(Charsets.UTF_8).contentEquals(raw)) throw IOException("Ожидался UTF-8")
-        value
-    } ?: throw IOException("Не удалось прочитать файл")
+    resolver.openInputStream(uri)?.use(::readMarkdownStream) ?: throw IOException("Не удалось прочитать файл")
+
+internal fun readMarkdownStream(stream: InputStream): String {
+    val bytes = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    while (true) {
+        val count = stream.read(buffer)
+        if (count < 0) break
+        if (bytes.size() + count > maxDocumentBytes) throw IOException("Файл превышает 512 КиБ")
+        bytes.write(buffer, 0, count)
+    }
+    val raw = bytes.toByteArray()
+    val value = raw.toString(Charsets.UTF_8)
+    if (!value.toByteArray(Charsets.UTF_8).contentEquals(raw)) throw IOException("Ожидался UTF-8")
+    return value
+}

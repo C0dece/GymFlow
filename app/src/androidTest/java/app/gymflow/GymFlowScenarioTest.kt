@@ -1,6 +1,7 @@
 package app.gymflow
 
 import android.os.ParcelFileDescriptor
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Base64
 import androidx.compose.ui.test.*
@@ -13,6 +14,7 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import app.gymflow.data.Theme
+import app.gymflow.data.missingFile
 import app.gymflow.domain.*
 import java.io.File
 import java.time.LocalDate
@@ -290,6 +292,8 @@ class GymFlowScenarioTest {
         scrollClick("save_skill_attempt")
         ui.waitUntil(15_000) { ui.onAllNodesWithText("Критерий подтверждён").fetchSemanticsNodes().isNotEmpty() }
         screenshot("movements-skill")
+        click("movement_back")
+        await("movement_tab_2")
         click("movement_back")
         click("progression_back")
         click("start_training")
@@ -939,6 +943,176 @@ class GymFlowScenarioTest {
         }
     }
 
+    @Test fun primaryScreensFitAtLargeFontAndOnTablet() {
+        createVault()
+        selectFolder()
+        val previous = shell("settings get system font_scale").trim()
+        try {
+            shell("wm size 640x1280")
+            shell("wm density 320")
+            shell("settings put system font_scale 2.0")
+            ui.waitUntil(15_000) { ui.activity.resources.configuration.let { it.screenWidthDp <= 320 && it.fontScale >= 1.99f } }
+            for ((route, screen) in listOf("home" to "home", "program" to "programs", "history" to "history",
+                "notes" to "notes_page", "settings" to "settings")) {
+                click("nav_$route")
+                await(screen)
+                if (route == "home") ui.onNodeWithTag("start_training").assertIsDisplayed()
+                screenshot("audit-320dp-$route")
+            }
+            click("nav_program")
+            scrollClick("new_program")
+            screenshot("audit-320dp-program-editor")
+            device.pressBack()
+            click("nav_notes")
+            ui.onNodeWithTag("new_sport_note").assertIsDisplayed()
+            click("new_sport_note")
+            await("note_body")
+            screenshot("audit-320dp-note-editor")
+            device.pressBack()
+            shell("wm size 1840x2560")
+            shell("settings put system font_scale 1.0")
+            ui.waitUntil(15_000) { ui.activity.resources.configuration.screenWidthDp >= 840 }
+            click("nav_home")
+            screenshot("audit-920dp-home")
+            click("nav_notes")
+            screenshot("audit-920dp-notes")
+        } finally {
+            if (previous == "null" || previous.isBlank()) shell("settings delete system font_scale")
+            else shell("settings put system font_scale $previous")
+            shell("wm size reset")
+            shell("wm density reset")
+        }
+    }
+
+    @Test fun notesSyncRecoverAfterMoveAndRestoreFromBackup() {
+        createVault()
+        selectFolder()
+        val repo = app.repository
+        val vault = runBlocking { repo.settings.values.first().vaultId }
+        assertEquals(vault, shell("cat '$path/gymflow-vault.md'").trim())
+        val profile = Profile(name = "Участник заметок QA")
+        val program = Program(title = "Программа заметок QA")
+        val planned = Session(title = "Тренировка заметок QA", date = LocalDate.now().toString(), participants = listOf(profile))
+        runBlocking { repo.save(profile); repo.save(program); repo.save(planned); repo.flush() }
+        val file = waitForFile(SessionStatus.PLANNED).first
+
+        click("start_training")
+        scrollClick("plan_notes")
+        click("new_workout_note")
+        replace("note_body", "До занятия: [[Готовность]]")
+        hideKeyboard()
+        scrollClick("finish_note")
+        device.pressBack()
+        click("confirm_start_plan")
+        await("workout")
+        click("workout_menu")
+        click("workout_notes")
+        click("new_workout_note")
+        replace("note_body", "Во время занятия")
+        hideKeyboard()
+        screenshot("audit-workout-note")
+        scrollClick("finish_note")
+        device.pressBack()
+        click("finish_workout")
+        click("confirm_finish")
+        await("start_training")
+        runBlocking { repo.flush() }
+        val closed = Markdown.read(shell("cat '$file'"))?.document as Session
+        assertEquals(SessionStatus.COMPLETED, closed.status)
+        assertEquals(listOf("До занятия: [[Готовность]]", "Во время занятия"), closed.workoutNotes.map { it.body })
+
+        click("nav_notes")
+        click("new_sport_note")
+        replace("sport_note_title", "Восстановление QA")
+        replace("note_body", "После занятия. [[Сон]]")
+        hideKeyboard()
+        ui.onNodeWithText("Привязать тренировку").performScrollTo().performClick()
+        scrollClick("note_link_${planned.id}")
+        ui.onNodeWithText("Привязать программу").performScrollTo().performClick()
+        scrollClick("note_link_${program.id}")
+        screenshot("audit-sport-note")
+        ui.onNodeWithText("Готово").performScrollTo().performClick()
+        replace("notes_search", "Восстановление QA")
+        hideKeyboard()
+        screenshot("audit-notes-search")
+        val note = runBlocking { repo.library.first().notes.single() }
+        assertEquals(planned.id, note.sessionId)
+        assertEquals(program.id, note.programId)
+        runBlocking { repo.flush() }
+        val noteFile = "$path/Заметки/${note.id}.md"
+        val raw = shell("cat '$noteFile'")
+        assertTrue(raw.contains("После занятия. [[Сон]]"))
+        writeFile(noteFile, raw.replace("[[Сон]]", "[[Гидратация]]"))
+        ui.waitUntil(30_000) { runBlocking { repo.library.first().notes.single().body.contains("[[Гидратация]]") } }
+
+        replace("notes_search", "Во время занятия")
+        hideKeyboard()
+        ui.onNodeWithText(planned.title).performClick()
+        await("note_body")
+        replace("note_body", "Запись дополнена после занятия")
+        hideKeyboard()
+        scrollClick("finish_note")
+        await("notes_page")
+        runBlocking { repo.flush() }
+
+        assertEquals("gone", shell("rm '$file' && printf gone"))
+        runBlocking { repo.refresh() }
+        assertEquals(missingFile, runBlocking { repo.library.first().records.single { it.id == planned.id }.conflict })
+        runBlocking { repo.keepOnlyOnDevice(planned.id); repo.maintain() }
+        assertEquals("missing", shell("test ! -e '$file' && printf missing"))
+        runBlocking { repo.resolve(planned.id, true) }
+        assertTrue(shell("cat '$file'").contains("Запись дополнена после занятия"))
+
+        val movedName = "$folderName-moved"
+        val moved = "$root/$movedName"
+        assertEquals("moved", shell("mv '$path' '$moved' && printf moved"))
+        runBlocking {
+            repo.editDocument(note.id) { (it as SportNote).copy(body = "Изменено офлайн") }
+            repo.maintain()
+        }
+        val offline = runBlocking { repo.library.first() }
+        assertTrue(offline.records.single { it.id == note.id }.pending)
+        assertNull(offline.records.single { it.id == note.id }.conflict)
+        selectFolder(movedName)
+        assertEquals(vault, runBlocking { repo.settings.values.first().vaultId })
+        runBlocking { repo.refresh(); repo.flush() }
+        assertTrue(shell("cat '$moved/Заметки/${note.id}.md'").contains("Изменено офлайн"))
+        assertEquals("1", shell("find '$moved' -name '${note.id}.md' | wc -l").trim())
+
+        val backup = File.createTempFile("gymflow-audit-", ".zip", app.cacheDir)
+        val archive = Uri.fromFile(backup)
+        try {
+            runBlocking { repo.export(archive, true) }
+            val restoredName = "$folderName-restored"
+            assertEquals("ready", shell("mkdir -p '$root/$restoredName' && printf ready"))
+            selectFolder(restoredName)
+            assertNotEquals(vault, runBlocking { repo.settings.values.first().vaultId })
+            assertTrue(runBlocking { repo.library.first().documents.isEmpty() })
+            runBlocking {
+                assertEquals(4, repo.restore(archive).restored)
+                assertEquals(0, repo.restore(archive).restored)
+                repo.flush()
+            }
+            val restored = runBlocking { repo.library.first() }
+            assertEquals("Изменено офлайн", restored.notes.single().body)
+            assertEquals(2, restored.sessions.single().workoutNotes.size)
+            assertEquals(planned.id, restored.sessions.single().id)
+            click("nav_notes")
+            replace("notes_search", "Восстановление QA")
+            hideKeyboard()
+            click("note_card_${note.id}")
+            ui.onNodeWithText("Удалить заметку").performScrollTo().performClick()
+            ui.onNodeWithText("Удалить", substring = false).performClick()
+            ui.waitUntil(12_000) { runBlocking { repo.library.first().notes.isEmpty() } }
+            runBlocking { repo.flush() }
+            val tombstone = Markdown.read(shell("cat '$root/$restoredName/Заметки/${note.id}.md'"))?.document as SportNote
+            assertTrue(tombstone.deleted)
+            assertEquals("", tombstone.body)
+        } finally {
+            backup.delete()
+        }
+    }
+
     private fun createVault() {
         assertEquals("ready", shell("mkdir -p '$path' && test -d '$path' && printf ready"))
     }
@@ -949,7 +1123,7 @@ class GymFlowScenarioTest {
         ui.waitUntil(10_000) { runBlocking { app.repository.settings.values.first().theme == Theme.DARK } }
     }
 
-    private fun selectFolder() {
+    private fun selectFolder(selectedFolder: String = folderName) {
         click("nav_settings")
         await("settings_choose_folder")
         val previousFolder = runBlocking { app.repository.settings.values.first().folder }
@@ -958,7 +1132,7 @@ class GymFlowScenarioTest {
             ui.onNodeWithText("Выбрать папку", substring = false).performClick()
         }
         device.waitForIdle()
-        var target = device.wait(Until.findObject(By.text(folderName)), 1200)
+        var target = device.wait(Until.findObject(By.text(selectedFolder)), 1200)
         if (target == null) {
             val documents = device.findObject(By.text("Documents"))
             if (documents != null) documents.click()
@@ -971,12 +1145,12 @@ class GymFlowScenarioTest {
                 requireNotNull(storage) { "Internal storage root missing in DocumentsUI" }.click()
                 requireNotNull(device.wait(Until.findObject(By.text("Documents")), 4000)).click()
             }
-            target = device.wait(Until.findObject(By.text(folderName)), 1600)
+            target = device.wait(Until.findObject(By.text(selectedFolder)), 1600)
             repeat(6) {
                 if (target == null) {
                     val x = device.displayWidth / 2
                     device.swipe(x, device.displayHeight * 4 / 5, x, device.displayHeight / 3, 30)
-                    target = device.wait(Until.findObject(By.text(folderName)), 750)
+                    target = device.wait(Until.findObject(By.text(selectedFolder)), 750)
                 }
             }
         }
@@ -984,7 +1158,7 @@ class GymFlowScenarioTest {
             screenshot("picker-folder-missing")
             val file = File(requireNotNull(app.getExternalFilesDir("qa")), "picker-folder-missing.xml")
             device.dumpWindowHierarchy(file)
-            error("Папка $folderName не видна в DocumentsUI")
+            error("Папка $selectedFolder не видна в DocumentsUI")
         }
         val useFolder = By.text(Pattern.compile("Use this folder", Pattern.CASE_INSENSITIVE))
         val allow = By.text(Pattern.compile("Allow", Pattern.CASE_INSENSITIVE))
@@ -996,25 +1170,25 @@ class GymFlowScenarioTest {
                 if (footer != null && row.visibleBounds.centerY() >= footer.top - 16) {
                     val x = device.displayWidth / 2
                     device.swipe(x, footer.top - 30, x, maxOf(footer.top - 280, 150), 20)
-                    target = device.wait(Until.findObject(By.text(folderName)), 2500)
+                    target = device.wait(Until.findObject(By.text(selectedFolder)), 2500)
                 }
                 checkNotNull(target).click()
                 val button = device.wait(Until.findObject(useFolder), 1600)
                 if (device.findObject(allow) == null) button?.click()
                 val grant = device.wait(Until.findObject(allow), 2200)
                 if (grant != null) {
-                    if (device.hasObject(By.textContains(folderName))) {
+                    if (device.hasObject(By.textContains(selectedFolder))) {
                         grant.click()
                         confirm = true
                     } else {
                         device.pressBack()
-                        target = device.wait(Until.findObject(By.text(folderName)), 3000)
+                        target = device.wait(Until.findObject(By.text(selectedFolder)), 3000)
                     }
                 }
             }
         }
         check(confirm) { "DocumentsUI did not confirm the selected QA folder" }
-        ui.waitUntil(15_000) { runBlocking { app.repository.settings.values.first().folder.contains(folderName) } }
+        ui.waitUntil(15_000) { runBlocking { app.repository.settings.values.first().folder.endsWith(selectedFolder) } }
         click("nav_home")
     }
 

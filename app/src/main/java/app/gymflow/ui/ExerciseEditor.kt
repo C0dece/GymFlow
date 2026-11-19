@@ -126,7 +126,7 @@ fun ExerciseEditor(
                 }
             } else Muted("${loadText(selected.load)} · ${unitText(selected.unit)}")
             Field(count, stringResource(R.string.set_count), { count = it }, keyboard = KeyboardType.Number)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AdaptivePair {
                 Field(first, stringResource(R.string.min_reps), { first = it }, Modifier.weight(1f), KeyboardType.Number)
                 Field(last, stringResource(R.string.max_reps), { last = it }, Modifier.weight(1f), KeyboardType.Number)
             }

@@ -5,7 +5,6 @@ package app.gymflow.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
@@ -16,20 +15,17 @@ import app.gymflow.domain.*
 import java.time.LocalDate
 
 @Composable
-internal fun SkillsPanel(library: Library, profile: Profile?, model: GymModel) {
-    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+internal fun SkillsPanel(library: Library, profile: Profile?, model: GymModel, skill: MovementSkill?, select: (String?) -> Unit) {
     var editing by remember { mutableStateOf(false) }
     var levelId by remember { mutableStateOf<String?>(null) }
     var attempt by remember { mutableStateOf<String?>(null) }
-    val skill = library.skills.find { it.id == selected }
     if (skill == null) {
         Button(onClick = { editing = true }, modifier = Modifier.testTag("new_skill")) { Text("Создать навык") }
         if (library.skills.isEmpty()) Muted("Задайте уровни и проверяемые критерии освоения.")
         library.skills.forEach { item ->
-            CardBlock(onClick = { selected = item.id }) { Text(item.name) }
+            CardBlock(onClick = { select(item.id) }) { Text(item.name) }
         }
     } else {
-        TextButton(onClick = { selected = null }) { Text("Все навыки") }
         SectionTitle(skill.name)
         if (skill.limitations.isNotBlank()) Muted(skill.limitations)
         val links = library.skills.filter { it.id in skill.relatedSkills }
@@ -80,7 +76,7 @@ internal fun SkillsPanel(library: Library, profile: Profile?, model: GymModel) {
             Button(onClick = {
                 val value = (skill ?: MovementSkill(name = name.trim())).copy(name = name.trim(), limitations = limits.trim(), relatedSkills = related)
                 model.save(value)
-                selected = value.id
+                select(value.id)
                 editing = false
             }, enabled = name.isNotBlank() && library.skills.none { it.id != skill?.id && it.name.equals(name.trim(), true) },
                 modifier = Modifier.testTag("save_skill")) { Text("Сохранить") }

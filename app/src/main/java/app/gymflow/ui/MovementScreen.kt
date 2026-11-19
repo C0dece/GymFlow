@@ -30,9 +30,11 @@ internal fun MovementScreen(library: Library, preferredProfile: String, model: G
     var editExercise by remember { mutableStateOf(false) }
     var variation by remember { mutableStateOf(false) }
     var editTrack by remember { mutableStateOf(false) }
+    var skillId by rememberSaveable { mutableStateOf<String?>(null) }
     val profiles = library.availableProfiles
     val person = profiles.find { it.id == profileId } ?: profiles.firstOrNull()
     val family = library.families.find { it.id == familyId }
+    val skill = library.skills.find { it.id == skillId.takeIf { tab == 2 } }
     val exercise = library.exercises.find { it.id == exerciseId }
     val tracks = remember(person?.id, library.movementTracks) {
         library.movementTracks.filter { it.profileId == person?.id }.associateBy { it.exerciseId }
@@ -61,13 +63,14 @@ internal fun MovementScreen(library: Library, preferredProfile: String, model: G
         when {
             exerciseId != null -> exerciseId = null
             familyId != null -> familyId = null
+            skill != null -> skillId = null
             else -> back()
         }
     }
 
-    BackHandler(exerciseId != null || familyId != null) { leave() }
+    BackHandler(exerciseId != null || familyId != null || skill != null) { leave() }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(exercise?.name ?: family?.name ?: "Движения") },
+        TopAppBar(title = { BarTitle(exercise?.name ?: family?.name ?: skill?.name ?: "Движения") },
             navigationIcon = { IconButton(onClick = ::leave, modifier = Modifier.testTag("movement_back")) { Symbol(R.drawable.ic_back, description = stringResource(R.string.back)) } })
     }) { padding ->
         ScreenColumn(Modifier.padding(padding).consumeWindowInsets(padding).testTag("movement_screen")) {
@@ -169,7 +172,7 @@ internal fun MovementScreen(library: Library, preferredProfile: String, model: G
                             }
                         }
                         1 -> CatalogPanel(library, person?.id, tracks, { exerciseId = it }, { editExercise = true })
-                        2 -> SkillsPanel(library, person, model)
+                        2 -> SkillsPanel(library, person, model, skill) { skillId = it }
                     }
                 }
             }

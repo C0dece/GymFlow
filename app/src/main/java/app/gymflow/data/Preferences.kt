@@ -33,13 +33,17 @@ data class Preferences(
     val minReps: Int = 8,
     val maxReps: Int = 12,
     val initialWeight: Double = 0.0,
-)
+    val vaultId: String = "",
+) {
+    val scope get() = vaultId.ifBlank { folder }
+}
 
 class Settings(private val context: Context) {
     val recovered = recoveryNotice.asStateFlow()
     fun acknowledgeRecovery() { recoveryNotice.value = false }
 
     private val folder = stringPreferencesKey("folder")
+    private val vault = stringPreferencesKey("vault_id")
     private val athlete = stringPreferencesKey("athlete")
     private val theme = stringPreferencesKey("theme")
     private val rotation = booleanPreferencesKey("rotation")
@@ -55,6 +59,7 @@ class Settings(private val context: Context) {
         val high = (row.asMap()[max] as? Int)?.takeIf { it in low..999 } ?: maxOf(low, 12)
         Preferences(
             folder = (row.asMap()[folder] as? String).orEmpty(),
+            vaultId = (row.asMap()[vault] as? String).orEmpty(),
             athlete = (row.asMap()[athlete] as? String).orEmpty(),
             theme = Theme.entries.find { it.name == row.asMap()[theme] } ?: Theme.DARK,
             rotation = row.asMap()[rotation] as? Boolean ?: true,
@@ -81,7 +86,10 @@ class Settings(private val context: Context) {
         }
     }
 
-    suspend fun selectFolder(value: String) {
-        context.settingsStore.edit { it[folder] = value }
+    suspend fun selectFolder(value: String, vaultId: String) {
+        context.settingsStore.edit { row ->
+            row[folder] = value
+            row[vault] = vaultId
+        }
     }
 }

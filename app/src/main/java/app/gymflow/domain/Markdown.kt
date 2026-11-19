@@ -28,10 +28,12 @@ object Markdown : DocumentCodec {
         prettyPrint = true
     }
     private val reserved = setOf("gymflow_schema", "id", "kind", "date", "status", "participants")
-    private val yamlKey = Regex("[A-Za-z_][A-Za-z0-9_-]*")
+    private val yamlKey = Regex("[\\p{L}_][\\p{L}\\p{N}_ -]*")
     private val front = Regex("""\A---\n([\s\S]*?)\n---\n""")
     private val block = Regex("""(?m)^$open\n([\s\S]*?)\n$close$""")
     private val report = Regex("""(?m)^$reportStart\n[\s\S]*?^$reportEnd$""")
+    private const val noteEnd = "<!-- /gymflow:note -->"
+    private val noteBlock = Regex("""(?m)^<!-- gymflow:note ([0-9a-f-]{36}) -->\n([\s\S]*?)\n$noteEnd$""")
 
     private val legacyNegative = Regex("""(?m)^([ \t]*(?:"(?:\\.|[^"\\])*"[ \t]*:[ \t]*)?)\\u002d(?=\d)""")
 
@@ -44,14 +46,9 @@ object Markdown : DocumentCodec {
             require(open !in text && reportStart !in text) { "Отсутствует заголовок GymFlow" }
             return null
         }
-        val pairs = frontmatter.groupValues[1].lineSequence().map { line ->
-            val pieces = line.split(':', limit = 2)
-            require(pieces.size == 2 && pieces[0].matches(yamlKey)) { "Повреждён YAML" }
-            pieces[0] to pieces[1].trim()
-        }.toList()
-        val yaml = pairs.toMap()
-        require(yaml.size == pairs.size) { "Повторяющиеся поля YAML" }
-        val version = requireNotNull(yaml["gymflow_schema"]?.toIntOrNull()) { "Неверная версия схемы" }
+        val yaml = frontmatterFields(frontmatter.groupValues[1])
+        fun scalar(key: String) = yaml[key]?.lineSequence()?.first()?.trim()?.let(::yamlScalar)
+        val version = requireNotNull(scalar("gymflow_schema")?.toIntOrNull()) { "Неверная версия схемы" }
         require(version in 0..schema) { "Версия GymFlow $version не поддерживается" }
 
         val content = text.substring(frontmatter.range.last + 1)
@@ -62,30 +59,81 @@ object Markdown : DocumentCodec {
         val readablePayload = if (version < schema) legacyNegative.replace(payload) { it.groupValues[1] + "-" } else payload
         val raw = json.parseToJsonElement(readablePayload).jsonObject
         val normalized = migrate(version, raw)
-        val document = if (version < 2 && normalized["kind"] == JsonPrimitive("session")) {
+        val metadata = if (version < 2 && normalized["kind"] == JsonPrimitive("session")) {
             json.decodeFromJsonElement(LegacySession.serializer(), JsonObject(normalized - "kind")).migrate()
         } else json.decodeFromJsonElement(Document.serializer(), normalized)
+        val bodyContent = block.replace(report.replace(content, ""), "")
+        val entries = noteBlock.findAll(bodyContent).toList()
+        val bodies = entries.associate { it.groupValues[1] to it.groupValues[2] }
+        val document = when (metadata) {
+            is Session -> metadata.copy(workoutNotes = metadata.workoutNotes.map {
+                it.copy(body = requireNotNull(bodies[it.id]).removePrefix(noteHeading(it.created)))
+            })
+            is SportNote -> if (metadata.deleted) metadata else metadata.copy(body = requireNotNull(bodies[metadata.id]))
+            else -> metadata
+        }
+        require(entries.size == bodies.size && bodies.keys == noteBodies(document).keys) { "Повреждён блок заметок" }
         validate(document)
-        require(yaml["id"] == document.id && yaml["kind"] == kind(document)) { "YAML и JSON описывают разные записи" }
+        require(scalar("id") == document.id && scalar("kind") == kind(document)) { "YAML и JSON описывают разные записи" }
         if (document is Session) {
-            require(yaml["date"] == document.date && yaml["status"] == document.status.name.lowercase()) {
+            require(scalar("date") == document.date && scalar("status") == document.status.name.lowercase()) {
                 "Дата или статус в YAML отличаются от JSON"
             }
-            val participantIds = yaml["participants"]?.let { value ->
-                require(value.startsWith("[") && value.endsWith("]")) { "Некорректный список участников в YAML" }
-                value.removeSurrounding("[", "]").split(',').map(String::trim)
+            val participantIds = yaml["participants"]?.trim()?.let { value ->
+                if (value.startsWith("[") && value.endsWith("]")) {
+                    value.removeSurrounding("[", "]").split(',').map { yamlScalar(it.trim()) }
+                } else value.lineSequence().filter { it.isNotBlank() && !it.trimStart().startsWith("#") }.map {
+                    val item = it.trim()
+                    require(item.startsWith("- ")) { "Некорректный список участников в YAML" }
+                    yamlScalar(item.removePrefix("- ").trim())
+                }.toList()
             }
             require(participantIds == document.participants.map { it.id }) { "Участники в YAML отличаются от JSON" }
         }
         val readable = report.findAll(content).toList().singleOrNull()
         require(readable != null || version == 0) { "Отчёт GymFlow повреждён" }
-        return MarkdownDocument(document, block.replace(report.replace(content, ""), "").trim('\n'), yaml.filterKeys { it !in reserved })
+        return MarkdownDocument(document, noteBlock.replace(bodyContent, "").trim('\n'), yaml.filterKeys { it !in reserved })
     }
+
+    private fun yamlScalar(value: String): String = when {
+        value.startsWith("'") && value.endsWith("'") -> value.removeSurrounding("'").replace("''", "'")
+        value.startsWith("\"") && value.endsWith("\"") -> json.decodeFromString<String>(value)
+        else -> value.substringBefore(" #").trimEnd()
+    }
+
+    private fun frontmatterFields(source: String): Map<String, String> = buildMap {
+        val fields = LinkedHashMap<String, StringBuilder>()
+        var field: StringBuilder? = null
+        source.lineSequence().forEach { line ->
+            val key = line.substringBefore(':')
+            if (':' in line && key.matches(yamlKey)) {
+                require(key !in fields) { "Повторяющиеся поля YAML" }
+                field = StringBuilder(line.substringAfter(':').removePrefix(" "))
+                fields[key] = requireNotNull(field)
+            } else {
+                require(line.isBlank() || line.first().isWhitespace() || line.startsWith('#') || line.startsWith("- ")) {
+                    "Повреждён YAML"
+                }
+                field?.append('\n')?.append(line)
+            }
+        }
+        fields.forEach { (key, value) -> put(key, value.toString()) }
+    }
+
+    private fun noteBodies(document: Document): Map<String, String> = when (document) {
+        is Session -> document.workoutNotes.associate { it.id to it.body }
+        is SportNote -> if (document.deleted) emptyMap() else mapOf(document.id to document.body)
+        else -> emptyMap()
+    }
+
+    private fun noteHeading(created: String) = "### Заметка от $created\n\n"
 
     override fun write(document: Document, notes: String, extraYaml: Map<String, String>): String {
         validate(document)
         require(listOf(open, close, reportStart, reportEnd).none { it in notes }) { "Заметка содержит служебный маркер" }
-        require(extraYaml.all { (key, value) -> key !in reserved && key.matches(yamlKey) && value.none { it == '\n' || it == '\r' } })
+        require(extraYaml.all { (key, value) ->
+            key !in reserved && key.matches(yamlKey) && frontmatterFields("$key: $value").keys == setOf(key)
+        })
         return buildString {
             appendLine("---")
             appendLine("gymflow_schema: $schema")
@@ -96,12 +144,28 @@ object Markdown : DocumentCodec {
                 appendLine("status: ${document.status.name.lowercase()}")
                 appendLine("participants: [${document.participants.joinToString { it.id }}]")
             }
-            extraYaml.forEach { (key, value) -> appendLine("$key: $value") }
+            extraYaml.forEach { (key, value) ->
+                append("$key:")
+                if (value.isNotEmpty() && !value.startsWith('\n')) append(' ')
+                appendLine(value)
+            }
             appendLine("---")
             appendLine()
             appendLine(reportStart)
             appendLine(render(document))
             appendLine(reportEnd)
+            noteBodies(document).forEach { (id, body) ->
+                require(listOf(open, close, reportStart, reportEnd, "<!-- gymflow:note ", noteEnd).none { it in body }) {
+                    "Заметка содержит служебный маркер"
+                }
+                appendLine()
+                appendLine("<!-- gymflow:note $id -->")
+                if (document is Session) {
+                    append(noteHeading(document.workoutNotes.first { it.id == id }.created))
+                }
+                appendLine(body.replace("\r\n", "\n"))
+                appendLine(noteEnd)
+            }
             if (notes.isNotBlank()) {
                 appendLine()
                 appendLine(notes)
@@ -134,12 +198,15 @@ object Markdown : DocumentCodec {
         is MovementTrack -> "movement_track"
         is MovementSkill -> "movement_skill"
         is SkillAttempt -> "skill_attempt"
+        is SportNote -> "sport_note"
     }
 
     private fun validate(document: Document) {
         require(UUID.fromString(document.id).toString() == document.id) { "Некорректный идентификатор" }
         when (document) {
             is Session -> {
+                require(document.workoutNotes.distinctBy { it.id }.size == document.workoutNotes.size)
+                document.workoutNotes.forEach { validateNote(it.id, it.created, it.updated) }
                 LocalDate.parse(document.date)
                 document.scheduledFor?.let(LocalDate::parse)
                 document.started?.let(Instant::parse)
@@ -189,7 +256,16 @@ object Markdown : DocumentCodec {
             is MovementFamily, is MovementSkill, is MovementTrack, is SkillAttempt -> Unit
             is Profile -> require(document.name.isNotBlank())
             is Exercise -> require(document.name.isNotBlank() && document.repsMin in 1..document.repsMax)
+            is SportNote -> {
+                require(document.title.isNotBlank())
+                validateNote(document.id, document.created, document.updated)
+            }
         }
+    }
+
+    private fun validateNote(id: String, created: String, updated: String) {
+        require(UUID.fromString(id).toString() == id)
+        require(Instant.parse(updated) >= Instant.parse(created))
     }
 
     private fun validatePlan(plan: ExercisePlan) {
@@ -249,6 +325,8 @@ object Markdown : DocumentCodec {
         ?.substringAfter(':')?.trim()?.toIntOrNull()
 
     private fun render(document: Document): String = when (document) {
+        is SportNote -> "# ${md(document.title)}\n\n" +
+            if (document.deleted) "Заметка удалена" else "Создана: ${document.created}"
         is Session -> sessionReport(document)
         is Profile -> "# ${md(document.name)}\n\nПрофиль участника"
         is ProgressionPolicy -> "# Правила прогрессии\n\nСтратегия: ${document.ruleSet.strategy}. Версия: ${document.version}."

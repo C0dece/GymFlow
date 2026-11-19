@@ -9,11 +9,12 @@ import androidx.work.*
 import app.gymflow.data.Journal
 import app.gymflow.data.Repository
 import app.gymflow.data.Settings
+import app.gymflow.data.journalMigration
 import java.util.concurrent.TimeUnit
 
 class GymFlowApp : Application() {
     val repository by lazy {
-        val database = Room.databaseBuilder(this, Journal::class.java, "gymflow.db").build()
+        val database = Room.databaseBuilder(this, Journal::class.java, "gymflow.db").addMigrations(journalMigration).build()
         Repository(this, database, Settings(this))
     }
 

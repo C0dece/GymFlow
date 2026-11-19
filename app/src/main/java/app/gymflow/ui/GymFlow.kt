@@ -12,6 +12,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -29,6 +31,7 @@ private enum class Page(val route: String, val icon: Int, val label: Int) {
     HOME("home", R.drawable.ic_today, R.string.home),
     PROGRAM("program", R.drawable.ic_program, R.string.program),
     HISTORY("history", R.drawable.ic_history, R.string.history),
+    NOTES("notes", R.drawable.ic_notes, R.string.notes),
     SETTINGS("settings", R.drawable.ic_settings, R.string.settings),
 }
 
@@ -47,6 +50,7 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
     val entry by nav.currentBackStackEntryAsState()
     val workout = entry?.destination?.route in setOf(workoutRoute, "plan/{id}", "progression", "movements")
     val selected = Page.entries.find { it.route == entry?.destination?.route } ?: Page.HOME
+    val compactNavigation = LocalConfiguration.current.screenWidthDp / LocalDensity.current.fontScale < 420
     val selectFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) model.connect(uri)
     }
@@ -74,13 +78,14 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
                                         Symbol(R.drawable.ic_dumbbell, modifier = Modifier.padding(7.dp).size(23.dp))
                                     }
                                 }
-                                Text(stringResource(if (selected == Page.HOME) R.string.app_name else selected.label),
-                                    style = MaterialTheme.typography.titleLarge)
+                                BarTitle(stringResource(if (selected == Page.HOME) R.string.app_name else selected.label))
                             }
                         },
                         actions = {
                             if (selected == Page.HOME && preferences.folder.isNotBlank()) {
-                                TextButton(onClick = model::refresh) { Text(stringResource(R.string.refresh)) }
+                                IconButton(onClick = model::refresh) {
+                                    Symbol(R.drawable.ic_sync, description = stringResource(R.string.refresh))
+                                }
                             }
                         },
                     )
@@ -100,15 +105,19 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
                                         restoreState = true
                                     }
                                 },
-                                icon = { Symbol(page.icon) },
-                                label = { Text(stringResource(page.label), style = MaterialTheme.typography.labelSmall, maxLines = 2) },
+                                icon = { Symbol(page.icon, description = stringResource(page.label).takeIf { compactNavigation }) },
+                                alwaysShowLabel = !compactNavigation,
+                                label = if (compactNavigation) null else {
+                                    { Text(stringResource(page.label), style = MaterialTheme.typography.labelSmall) }
+                                },
                             )
                         }
                     }
                 }
             },
         ) { padding ->
-            NavHost(nav, startDestination = "home", modifier = Modifier.padding(padding).consumeWindowInsets(padding)) {
+            NavHost(nav, startDestination = "home", modifier = Modifier.padding(padding).consumeWindowInsets(padding)
+                .fillMaxSize().wrapContentWidth().widthIn(max = 840.dp).fillMaxSize()) {
                 composable("home") {
                     Home(library, preferences, status, { selectFolder.launch(null) }, open, preview, repeat, progression,
                         openDays = { id -> nav.navigate("workout/$id?days=true") { launchSingleTop = true } },
@@ -123,6 +132,7 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
                 }
                 composable("program") { Programs(library, preferences, model, preview) }
                 composable("history") { History(library, preferences, open, repeat, reviewDay) }
+                composable("notes") { NotesPage(library, model) }
                 composable("settings") { PreferencesPage(library, preferences, status, model, progression) { selectFolder.launch(null) } }
                 composable("progression") { ProgressionScreen(library, model, { nav.popBackStack() }, preview) {
                     nav.navigate("movements") { launchSingleTop = true }
@@ -191,7 +201,7 @@ private fun Home(
     extendCycle: (Program, Profile) -> Unit,
     start: (String?) -> Unit,
 ) {
-    if (!library.loaded || library.scope != preferences.folder) {
+    if (!library.loaded || library.scope != preferences.scope) {
         if (status.issues.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         else ScreenColumn {
             SectionTitle(stringResource(R.string.settings_unavailable))
@@ -238,7 +248,7 @@ private fun Home(
         }
     }
     val conflicts = library.records.count { it.conflict != null }
-    val pending = library.records.count { it.pending }
+    val pending = library.records.count { it.pending && !it.localOnly }
 
     ScreenColumn(Modifier.testTag("home")) {
         Muted(fullDate(today))
@@ -258,7 +268,7 @@ private fun Home(
                     Text(active?.let { if (it.workouts.size == 1) it.defaultWorkout.templateTitle ?: it.title else it.title }
                         ?: plannedMember?.templateTitle ?: next?.title ?: stringResource(R.string.free_session),
                         modifier = Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium)
-                    if (canSwitchDay) {
+                    if (canSwitchDay && (active != null || next == null)) {
                         IconButton(
                             onClick = {
                                 if (active != null) openDays(active.id)
@@ -276,8 +286,6 @@ private fun Home(
                     Text(stringResource(R.string.sets_progress, complete, total))
                 } else if (next != null) {
                     Text(shortDate(next.date))
-                } else {
-                    Text(stringResource(R.string.first_training))
                 }
                 Button(
                     onClick = {
@@ -289,12 +297,13 @@ private fun Home(
                     },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("start_training"),
                 ) {
-                    Text(if (active == null) stringResource(R.string.start_workout) else stringResource(R.string.continue_training))
-                    Spacer(Modifier.width(6.dp))
-                    Symbol(R.drawable.ic_forward, modifier = Modifier.size(19.dp))
+                    Text(stringResource(if (active != null) R.string.continue_training else if (next != null) R.string.view_plan
+                        else R.string.start_workout))
                 }
-                OutlinedButton(onClick = { preview(next?.id) }, modifier = Modifier.fillMaxWidth().testTag("view_plan")) {
-                    Text(stringResource(R.string.view_plan))
+                if (next == null || active != null) {
+                    OutlinedButton(onClick = { preview(next?.id) }, modifier = Modifier.fillMaxWidth().testTag("view_plan")) {
+                        Text(stringResource(R.string.view_plan))
+                    }
                 }
                 if (active != null) {
                     TextButton(onClick = { start(null) }, modifier = Modifier.testTag("new_active")) { Text(stringResource(R.string.new_session)) }
@@ -344,7 +353,7 @@ private fun Home(
         }
 
         SectionTitle(stringResource(R.string.overview))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AdaptivePair(spacing = 10.dp) {
             CardBlock(Modifier.weight(1f)) {
                 Text(finished.size.toString(), style = MaterialTheme.typography.headlineMedium)
                 Muted(stringResource(R.string.completed_workouts))

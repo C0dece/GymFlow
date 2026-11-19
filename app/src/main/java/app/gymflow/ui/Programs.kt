@@ -56,11 +56,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
 
     ScreenColumn(Modifier.testTag("programs")) {
         if (program == null) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            AdaptivePair {
                 Button(
                     onClick = { editProgram = true },
                     modifier = Modifier.weight(1f).testTag("new_program")
@@ -71,7 +67,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
                 OutlinedButton(
                     onClick = { chooseFile(null) },
-                    modifier = Modifier.testTag("import_program_file")
+                    modifier = Modifier.weight(1f).testTag("import_program_file")
                 ) {
                     Text("Импорт Markdown")
                 }
@@ -111,7 +107,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Muted(stringResource(R.string.days_count, item.days.size))
                         val participantNames = item.participantIds.mapNotNull { id -> library.profiles.find { it.id == id }?.name }
                         if (participantNames.isNotEmpty()) {
@@ -119,16 +115,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(onClick = { currentId = item.id }) {
-                            Text("Открыть программу")
-                            Spacer(Modifier.width(4.dp))
-                            Symbol(R.drawable.ic_forward, modifier = Modifier.size(16.dp))
-                        }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { currentId = item.id; editProgram = true }) {
                             Symbol(R.drawable.ic_settings, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
@@ -187,25 +174,20 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
             }
 
             // Action buttons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            AdaptivePair {
                 Button(
-                    onClick = { editProgram = true },
-                    modifier = Modifier.weight(1f).testTag("edit_program_btn")
-                ) {
-                    Symbol(R.drawable.ic_settings)
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.edit_program))
-                }
-                OutlinedButton(
                     onClick = { editingDayId = null; editDay = true },
                     modifier = Modifier.weight(1f).testTag("add_day_btn")
                 ) {
                     Symbol(R.drawable.ic_add)
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.add_day))
+                }
+                OutlinedButton(
+                    onClick = { editProgram = true },
+                    modifier = Modifier.weight(1f).testTag("edit_program_btn")
+                ) {
+                    Text(stringResource(R.string.edit_program))
                 }
             }
 
@@ -243,26 +225,15 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
 
             // Schedule & Participants Info Card
             CardBlock {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        val scheduleType = if (program.cycle) {
-                            program.completionCycle?.let { "Цикл: ${it.visitsPerWeek} посещ./нед." } ?: "Цикл каждые ${program.interval} дн."
-                        } else {
-                            "По дням недели"
-                        }
-                        Text("Режим: $scheduleType", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                        val participantNames = program.participantIds.mapNotNull { id -> library.profiles.find { it.id == id }?.name }
-                        if (participantNames.isNotEmpty()) {
-                            Muted("Участники: ${participantNames.joinToString(", ")}")
-                        }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val scheduleType = if (program.cycle) {
+                        program.completionCycle?.let { "Цикл: ${it.visitsPerWeek} посещ./нед." } ?: "Цикл каждые ${program.interval} дн."
+                    } else {
+                        "По дням недели"
                     }
-                    TextButton(onClick = { editProgram = true }) {
-                        Text("Настроить")
-                    }
+                    Text("Режим: $scheduleType", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    val participantNames = program.participantIds.mapNotNull { id -> library.profiles.find { it.id == id }?.name }
+                    if (participantNames.isNotEmpty()) Muted("Участники: ${participantNames.joinToString(", ")}")
                 }
             }
 
@@ -270,12 +241,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
             SectionTitle("Тренировочные дни (${program.days.size})")
 
             if (program.days.isEmpty()) {
-                CardBlock {
-                    Muted("В программе пока нет тренировочных дней. Добавьте первый день.")
-                    Button(onClick = { editingDayId = null; editDay = true }) {
-                        Text(stringResource(R.string.add_day))
-                    }
-                }
+                CardBlock { Muted("В программе пока нет тренировочных дней.") }
             }
 
             program.days.forEachIndexed { index, item ->
@@ -309,9 +275,6 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                     }
 
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { currentDay = item.id }) {
-                            Text("Открыть день")
-                        }
                         TextButton(onClick = { editingDayId = item.id; editDay = true }) {
                             Text(stringResource(R.string.change))
                         }
@@ -335,14 +298,6 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
             }
 
-            Button(
-                onClick = { editingDayId = null; editDay = true },
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-            ) {
-                Symbol(R.drawable.ic_add)
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.add_day))
-            }
         } else {
             // Day Details View
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -369,13 +324,10 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
 
             Text(day.title, style = MaterialTheme.typography.headlineLarge)
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(
                     onClick = { editPlan = -1 },
-                    modifier = Modifier.weight(1f).testTag("program_add_exercise")
+                    modifier = Modifier.testTag("program_add_exercise")
                 ) {
                     Symbol(R.drawable.ic_add)
                     Spacer(Modifier.width(6.dp))
@@ -383,7 +335,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
                 OutlinedButton(
                     onClick = { editingDayId = day.id; editDay = true },
-                    modifier = Modifier.weight(1f).testTag("edit_day_btn")
+                    modifier = Modifier.testTag("edit_day_btn")
                 ) {
                     Text(stringResource(R.string.edit_day))
                 }
@@ -447,11 +399,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle(stringResource(R.string.exercise_count, day.exercises.size))
                 TextButton(onClick = { blockId = "new" }, modifier = Modifier.testTag("add_training_block")) {
                     Text("+ Блок/суперсет")
@@ -459,12 +407,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
             }
 
             if (day.exercises.isEmpty()) {
-                CardBlock {
-                    Muted("В этом дне пока нет упражнений. Добавьте упражнения и укажите рабочие подходы.")
-                    Button(onClick = { editPlan = -1 }) {
-                        Text(stringResource(R.string.add_exercise))
-                    }
-                }
+                CardBlock { Muted("В этом дне пока нет упражнений.") }
             }
 
             day.exercises.forEachIndexed { index, plan ->
@@ -525,16 +468,6 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
             }
 
-            if (day.exercises.isNotEmpty()) {
-                Button(
-                    onClick = { editPlan = -1 },
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                ) {
-                    Symbol(R.drawable.ic_add)
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.add_exercise))
-                }
-            }
         }
     }
 
@@ -565,7 +498,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 val exists = p.days.any { it.id == updated.id }
                 p.copy(days = if (exists) p.days.map { if (it.id == updated.id) updated else it } else p.days + updated)
             }
-            if (day != null) currentDay = updated.id
+            if (targetDay == null || day != null) currentDay = updated.id
             editDay = false
             editingDayId = null
         }
@@ -814,7 +747,7 @@ private fun PersonalPlan(plan: ExercisePlan, profiles: List<Profile>, close: () 
         }
         Field(weight, stringResource(R.string.weight_unit, unitText(plan.exercise.unit)), { weight = it }, keyboard = KeyboardType.Decimal)
         Field(count, stringResource(R.string.set_count), { count = it }, keyboard = KeyboardType.Number)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AdaptivePair {
             Field(low, stringResource(R.string.min_reps), { low = it }, Modifier.weight(1f), KeyboardType.Number)
             Field(high, stringResource(R.string.max_reps), { high = it }, Modifier.weight(1f), KeyboardType.Number)
         }
