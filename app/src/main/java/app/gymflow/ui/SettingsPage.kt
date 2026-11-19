@@ -72,6 +72,10 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
                     is Exercise -> doc.name
                     is ProgressionPolicy -> stringResource(R.string.progression)
                     is ProgressionReview -> stringResource(R.string.progression)
+                    is MovementFamily -> doc.name
+                    is MovementSkill -> doc.name
+                    is MovementTrack -> doc.role.label
+                    is SkillAttempt -> doc.measure.label
                     null -> row.id
                 }
                 HorizontalDivider()

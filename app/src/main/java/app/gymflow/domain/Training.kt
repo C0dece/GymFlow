@@ -1,7 +1,14 @@
 package app.gymflow.domain
 
 import java.time.LocalDate
+import java.time.Instant
+import java.time.Duration
 import java.time.temporal.ChronoUnit
+
+internal fun restRemaining(deadline: String?, now: Instant = Instant.now()): Long =
+    deadline?.let {
+        ((Duration.between(now, Instant.parse(it)).toMillis().coerceAtLeast(0L) + 999L) / 1000L)
+    } ?: 0L
 
 fun nextWorkout(session: Session, currentId: String): ParticipantWorkout? {
     val start = session.workouts.indexOfFirst { it.profile.id == currentId }
@@ -18,7 +25,7 @@ fun ParticipantWorkout.nextExerciseId(): String? {
 }
 
 fun SetPlan.volumeKg(exercise: Exercise): Double? {
-    if (!weightKnown || !repsKnown || maxEffort) return null
+    if (purpose != SetRole.WORK || !weightKnown || !repsKnown || maxEffort) return null
     return loadFactor(exercise)?.let { weight * repsMax * it }
 }
 
@@ -31,13 +38,13 @@ private fun loadFactor(exercise: Exercise): Double? = when (exercise.load) {
 fun repeatSession(source: Session, id: String, date: LocalDate, history: List<Session>): Session {
     val workouts = source.workouts.map { old ->
         val fresh = ParticipantWorkout(profile = old.profile, templateId = old.templateId, templateTitle = old.templateTitle,
-            templateNotes = old.templateNotes)
+            templateNotes = old.templateNotes, trainingBlocks = old.trainingBlocks)
         val prior = performance(history, old.profile.id).groupBy { it.exercise.id }
         old.plans().fold(fresh) { item, plan ->
-            val last = prior[plan.exercise.id]?.lastOrNull { it.exercise.load == plan.exercise.load }
+            val last = prior[plan.exercise.id]?.lastOrNull { it.exercise.comparableWith(plan.exercise) }
             val reference = last?.actuals?.lastOrNull { it.weightKnown && it.repsKnown }
             val sets = plan.sets.map { set ->
-                if (set.warmup || reference == null || plan.exercise.load in setOf(Load.OTHER, Load.BODYWEIGHT)) set
+                if (set.purpose != SetRole.WORK || reference == null || plan.exercise.load in setOf(Load.OTHER, Load.BODYWEIGHT)) set
                 else set.copy(weight = reference.weight * last.exercise.unit.toKg / plan.exercise.unit.toKg, weightKnown = true)
             }
             item.addExercise(plan.copy(sets = sets))
@@ -47,7 +54,7 @@ fun repeatSession(source: Session, id: String, date: LocalDate, history: List<Se
 }
 
 fun plannedOn(program: Program, date: LocalDate): List<ProgramDay> {
-    if (!program.enabled || program.days.isEmpty()) return emptyList()
+    if (!program.enabled || program.days.isEmpty() || program.completionCycle != null) return emptyList()
     val offset = ChronoUnit.DAYS.between(LocalDate.parse(program.anchor), date)
     if (offset < 0) return emptyList()
     if (!program.cycle) return program.days.filter { it.weekday == date.dayOfWeek }
@@ -92,7 +99,7 @@ fun performance(sessions: List<Session>, profileId: String): List<Performance> =
             val athlete = entry.athletes.single()
             if (athlete.skipped && athlete.sets.none { it.status == SetStatus.COMPLETED }) return@mapNotNull null
             val actuals = athlete.sets.mapNotNull {
-                it.actual.takeIf { _ -> it.status == SetStatus.COMPLETED && !it.plan.warmup }
+                it.actual.takeIf { _ -> it.status == SetStatus.COMPLETED && it.plan.purpose == SetRole.WORK && it.actual?.technique != Technique.CHANGED }
             }
             if (actuals.isEmpty()) null else Performance(session.date, entry.exercise, actuals, athlete.rir)
         }

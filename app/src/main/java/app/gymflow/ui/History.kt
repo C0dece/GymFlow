@@ -41,9 +41,9 @@ fun History(library: Library, prefs: Preferences, open: (String) -> Unit, repeat
     val measures by produceState(emptyList<Performance>(), filtered, person?.id) {
         value = withContext(Dispatchers.Default) { person?.let { performance(filtered, it.id) }.orEmpty() }
     }
-    val exerciseList = remember(measures) { measures.map { it.exercise }.distinctBy { it.id } }
+    val exerciseList = remember(measures) { measures.asReversed().map { it.exercise }.distinctBy { it.id } }
     val exercise = exerciseList.find { it.id == exerciseId } ?: exerciseList.firstOrNull()
-    val series = remember(measures, exercise) { measures.filter { it.exercise.id == exercise?.id } }
+    val series = remember(measures, exercise) { measures.filter { exercise != null && it.exercise.comparableWith(exercise) } }
     val body = remember(entries) {
         entries.mapNotNull { (session, row) -> row.metrics.bodyWeightKg?.let { session.date to it } }.reversed()
     }
@@ -92,7 +92,13 @@ fun History(library: Library, prefs: Preferences, open: (String) -> Unit, repeat
                 }
                 val exact = series.filter { it.exercise.load == exercise.load }
                 val measured = exact.filter { it.actuals.any { actual -> actual.weightKnown } }
-                if (exact.isNotEmpty()) {
+                if (exercise.cardio != null) {
+                    item { Muted(exercise.cardio.label) }
+                    val aerobic = exact.flatMap { row -> row.actuals.flatMap { actual ->
+                        actual.measurements.entries.map { (kind, value) -> kind to (row.date to value) }
+                    } }.groupBy({ it.first }, { it.second })
+                    aerobic.forEach { (kind, points) -> item { Trend(kind.label, points) } }
+                } else if (exact.isNotEmpty()) {
                     if (measured.isNotEmpty()) item { Trend(stringResource(R.string.working_weight), measured.map { it.date to it.maxKg }) }
                     item {
                         CardBlock {
@@ -146,7 +152,7 @@ private fun ExerciseFilter(current: Exercise, entries: List<Exercise>, library: 
 }
 
 @Composable
-private fun Trend(title: String, points: List<Pair<String, Double>>) {
+internal fun Trend(title: String, points: List<Pair<String, Double>>) {
     val samples = points.takeLast(24)
     val first = samples.first()
     val last = samples.last()

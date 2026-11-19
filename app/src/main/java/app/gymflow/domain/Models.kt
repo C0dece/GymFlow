@@ -1,8 +1,11 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package app.gymflow.domain
 
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.util.UUID
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -42,6 +45,8 @@ data class Exercise(
     val notes: String = "",
     val archived: Boolean = false,
     val favorite: Boolean = false,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val movement: MovementDetails? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val cardio: CardioType? = null,
 ) : Document
 
 @Serializable
@@ -57,10 +62,17 @@ data class SetPlan(
     val maxEffort: Boolean = false,
     val repsKnown: Boolean = true,
     val targetReps: Int? = null,
-)
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val role: SetRole? = null,
+) {
+    val purpose: SetRole get() = role ?: if (warmup) SetRole.WARMUP else SetRole.WORK
+}
 
 @Serializable
-data class Actual(val weight: Double, val reps: Int, val note: String = "", val weightKnown: Boolean = true, val repsKnown: Boolean = true)
+data class Actual(
+    val weight: Double, val reps: Int, val note: String = "", val weightKnown: Boolean = true, val repsKnown: Boolean = true,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val measurements: Map<Measure, Double> = emptyMap(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val technique: Technique? = null,
+)
 
 @Serializable
 data class SetEntry(
@@ -68,6 +80,7 @@ data class SetEntry(
     val plan: SetPlan,
     val actual: Actual? = null,
     val status: SetStatus = SetStatus.PLANNED,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val deferred: Boolean = false,
 ) {
     val proposed: Actual get() = actual ?: Actual(plan.weight, plan.targetReps ?: plan.repsMax, weightKnown = plan.weightKnown, repsKnown = plan.repsKnown && !plan.maxEffort)
 
@@ -75,7 +88,7 @@ data class SetEntry(
         copy(status = SetStatus.PLANNED)
     } else {
         require(proposed.weightKnown && proposed.repsKnown) { "Укажите вес и повторы" }
-        copy(actual = proposed, status = SetStatus.COMPLETED)
+        copy(actual = proposed, status = SetStatus.COMPLETED, deferred = false)
     }
 }
 
@@ -94,7 +107,15 @@ data class ExercisePlan(
     val exercise: Exercise,
     val sets: List<SetPlan>,
     val individual: Map<String, List<SetPlan>> = emptyMap(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val block: PlanBlock = PlanBlock.REQUIRED,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val selection: MovementSelection = MovementSelection.FIXED,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val skillId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val blockId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val restSeconds: Int? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val autoRest: Boolean = false,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val caution: String = "",
 ) {
+    init { require(restSeconds == null || restSeconds in 1..86400) }
     fun athlete(id: String) = Athlete(id, (individual[id] ?: sets).map { SetEntry(plan = it) })
 }
 
@@ -135,6 +156,7 @@ data class WorkoutTemplate(
     val weekday: DayOfWeek = DayOfWeek.MONDAY,
     val exercises: List<ExercisePlan> = emptyList(),
     val notes: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val blocks: List<TrainingBlock> = emptyList(),
 )
 
 typealias ProgramDay = WorkoutTemplate
@@ -150,4 +172,6 @@ data class Program(
     val anchor: String = LocalDate.now().toString(),
     val interval: Int = 2,
     val participantIds: List<String> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val completionCycle: CompletionCycle? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val caution: String = "",
 ) : Document

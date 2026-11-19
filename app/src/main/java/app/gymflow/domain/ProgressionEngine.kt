@@ -7,9 +7,9 @@ import kotlin.math.round
 
 class ProgressionIndex(sessions: List<Session>) {
     internal data class Sample(val evidence: ProgressionEvidence, val entry: ExerciseEntry, val finished: Boolean) {
-        val work = entry.athletes.single().sets.filterNot { it.plan.warmup }
+        val work = entry.athletes.single().sets.filter { it.plan.purpose == SetRole.WORK }
         private fun observed(set: SetEntry) =
-            set.actual?.takeIf { set.status == SetStatus.COMPLETED && it.repsKnown }
+            set.actual?.takeIf { set.status == SetStatus.COMPLETED && it.repsKnown && it.technique != Technique.CHANGED }
 
         val full = finished && !entry.athletes.single().skipped && work.isNotEmpty() && work.all {
             observed(it) != null
@@ -30,7 +30,7 @@ class ProgressionIndex(sessions: List<Session>) {
                 observed(row)?.let { it.reps < (row.plan.targetReps ?: row.plan.repsMin) } == true
         }
         fun supports(plan: List<SetPlan>, exercise: Exercise): Boolean {
-            val required = plan.filterNot { it.warmup }
+            val required = plan.filter { it.purpose == SetRole.WORK }
             return required.isNotEmpty() && work.size >= required.size && required.zip(work).all { (target, set) ->
                 val actual = observed(set) ?: return@all false
                 val reps = target.maxEffort || target.repsKnown && actual.reps >= (target.targetReps ?: target.repsMin)
@@ -73,8 +73,8 @@ class ProgressionIndex(sessions: List<Session>) {
                     }
                     entries.forEach { entry ->
                         val athlete = entry.athletes.single()
-                        val work = athlete.sets.filterNot { it.plan.warmup }
-                        val actual = work.mapNotNull { it.actual?.takeIf { a -> it.status == SetStatus.COMPLETED && a.repsKnown } }
+                        val work = athlete.sets.filter { it.plan.purpose == SetRole.WORK }
+                        val actual = work.mapNotNull { it.actual?.takeIf { a -> it.status == SetStatus.COMPLETED && a.repsKnown && a.technique != Technique.CHANGED } }
                         val evidence = ProgressionEvidence(session.id, session.date, actual.size, work.size,
                             actual.minOfOrNull { it.reps },
                             actual.filter { it.weightKnown }.maxOfOrNull { it.weight * entry.exercise.unit.toKg }, athlete.rir)
@@ -87,7 +87,7 @@ class ProgressionIndex(sessions: List<Session>) {
     }
 
     internal fun samples(profile: String, exercise: Exercise) =
-        history[profile to exercise.id].orEmpty().filter { it.entry.exercise.load == exercise.load }
+        history[profile to exercise.id].orEmpty().filter { it.entry.exercise.comparableWith(exercise) }
 
     internal fun previousTemplatePlan(profile: String, template: String, exercise: Exercise, baseline: List<SetPlan>): List<SetPlan>? =
         templateReceipts[Triple(profile, template, exercise.id)]
@@ -206,7 +206,7 @@ class ProgressionEngine(private val index: ProgressionIndex, private val policie
             }
             if (blocked != null) return decision(ActionKind.HOLD, blocked, rules = ids)
         }
-        val work = workingPlan.filterNot { it.warmup }
+        val work = workingPlan.filter { it.purpose == SetRole.WORK }
         val starting = if (action.kind == ActionKind.INCREASE_REPS && config.strategy !in setOf(ProgressionStrategy.AUTO, ProgressionStrategy.DOUBLE)) {
             val recorded = latest?.evidence?.minReps
             work.map { set ->
@@ -228,7 +228,7 @@ class ProgressionEngine(private val index: ProgressionIndex, private val policie
 
 private fun mergeWork(baseline: List<SetPlan>, work: List<SetPlan>): List<SetPlan> = buildList {
     val iterator = work.iterator()
-    baseline.forEach { if (it.warmup) add(it) else if (iterator.hasNext()) add(iterator.next()) }
+    baseline.forEach { if (it.purpose != SetRole.WORK) add(it) else if (iterator.hasNext()) add(iterator.next()) }
     while (iterator.hasNext()) add(iterator.next())
 }
 

@@ -13,13 +13,13 @@ class ProfileColorTest {
             "4291793386" to normalized, "#ZZ91EA" to null, "" to null, "unknown" to null,
         )
         cases.forEach { (raw, expected) ->
-            val legacy = src.replace("gymflow_schema: 3", "gymflow_schema: 2").replace("\"color\": null", "\"color\": \"$raw\"")
+            val legacy = src.replace("gymflow_schema: 5", "gymflow_schema: 2").replace("\"color\": null", "\"color\": \"$raw\"")
             val read = Markdown.read(legacy)?.document as Profile
             assertEquals(expected, read.color)
             assertEquals(read, Markdown.read(Markdown.write(read))?.document)
         }
         val legacyNegative = Markdown.write(profile.copy(color = normalized))
-            .replace("gymflow_schema: 3", "gymflow_schema: 2")
+            .replace("gymflow_schema: 5", "gymflow_schema: 2")
             .replace("\"color\": $normalized", "\"color\": \\u002d${-normalized}")
         assertEquals(normalized, (Markdown.read(legacyNegative)?.document as Profile).color)
         val absent = src.replace("    \"color\": null,\n", "")

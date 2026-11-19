@@ -34,6 +34,223 @@ class GymFlowScenarioTest {
     private val folderName = "GymFlow_QA_" + UUID.randomUUID().toString().take(8)
     private val path get() = "$root/$folderName"
 
+    @Test fun completionCycleWithRestOptionalBlocksAndCalendarPartner() {
+        createVault()
+        selectFolder()
+        val athlete = Profile(name = "Цикл QA")
+        val partner = Profile(name = "Календарь QA")
+        val date = LocalDate.now()
+        val strength = TrainingBlock(type = BlockType.MAIN, name = "Силовой блок QA")
+        val cardio = TrainingBlock(type = BlockType.CARDIO, name = "Кардио блок QA", requirement = PlanBlock.OPTIONAL)
+        val skill = TrainingBlock(type = BlockType.MOBILITY, name = "Навык блок QA", requirement = PlanBlock.OPTIONAL)
+        val first = WorkoutTemplate(title = "Верх цикла QA", blocks = listOf(strength, cardio, skill), exercises = listOf(
+            ExercisePlan(Exercise(name = "Жим цикла QA", load = Load.MACHINE), listOf(SetPlan(90.0, role = SetRole.RAMP), SetPlan(20.0)),
+                blockId = strength.id, restSeconds = 120, autoRest = true),
+            ExercisePlan(Exercise(name = "Дорожка цикла QA", cardio = CardioType.TREADMILL),
+                List(2) { SetPlan(weightKnown = false, repsKnown = false) }, blockId = cardio.id),
+            ExercisePlan(Exercise(name = "Баланс цикла QA"), listOf(SetPlan(role = SetRole.TECHNIQUE)), blockId = skill.id),
+        ))
+        val next = first.copy(id = newId(), title = "Низ цикла QA")
+        val cycle = Program(title = "Программа цикла QA", days = listOf(first, next), enabled = true, cycle = true,
+            anchor = date.toString(), participantIds = listOf(athlete.id), completionCycle = CompletionCycle(7, targetSessions = 3))
+        val fixed = WorkoutTemplate(title = "Календарная тренировка QA", weekday = date.plusDays(1).dayOfWeek, exercises = listOf(
+            ExercisePlan(Exercise(name = "Тяга партнёра QA", load = Load.MACHINE), listOf(SetPlan(35.0)))))
+        val calendar = Program(title = "Календарная программа QA", days = listOf(fixed), enabled = true,
+            anchor = date.toString(), participantIds = listOf(partner.id))
+        val repo = app.repository
+        writeFile("$path/cycle-inbound.md", Markdown.write(cycle))
+        runBlocking {
+            repo.refresh()
+            repo.settings.update(repo.settings.values.first().copy(athlete = athlete.id, rotation = false))
+            repo.update { listOf(athlete, partner, calendar) }
+            repo.schedule(date)
+            val appointment = repo.library.first().sessions.single { it.programId == cycle.id }
+            repo.editSession(appointment.id) { it.reschedule(date.plusDays(1)) }
+            repo.flush()
+        }
+        fun completed() = runBlocking { cyclePosition(cycle, athlete.id, repo.library.first().sessions).completed }
+        scrollClick("prepare_cycle_${athlete.id}")
+        await("plan_preview")
+        assertEquals(0, completed())
+        screenshot("cycle-plan")
+        click("confirm_start_plan")
+        scrollClick("complete_set_0")
+        await("rest_remaining")
+        scrollClick("complete_set_1")
+        ui.activityRule.scenario.recreate()
+        await("rest_remaining")
+        screenshot("cycle-rest")
+        assertEquals(0, completed())
+        if (InstrumentationRegistry.getArguments().getString("cycleCheckpoint") == "true") {
+            withActiveFile { _, session ->
+                assertEquals(1, session.workout(athlete.id)?.cycleSlot?.sequence)
+                assertEquals(2, session.workout(athlete.id)?.completed)
+                assertNotNull(session.workout(athlete.id)?.restUntil)
+            }
+            return
+        }
+        click("rest_stop")
+        click("next_exercise")
+        val cardioId = runBlocking { repo.library.first().active()!!.workout(athlete.id)!!.exercises[1].id }
+        val cardioSet = hasTestTag("complete_set_0") and hasAnyAncestor(hasTestTag("exercise_card_$cardioId"))
+        ui.waitUntil(10_000) { ui.onAllNodes(cardioSet).fetchSemanticsNodes().isNotEmpty() }
+        ui.onNode(cardioSet).performScrollTo().performClick()
+        replace("measure_DURATION", "600")
+        replace("measure_DISTANCE", "1500")
+        hideKeyboard()
+        scrollClick("save_set")
+        click("exercise_menu")
+        click("skip_training_block")
+        click("next_exercise")
+        click("exercise_menu")
+        click("skip_training_block")
+        click("workout_menu")
+        click("add_person")
+        chooseTemplate(fixed.title)
+        ui.onNodeWithText(partner.name).performScrollTo().performClick()
+        await("participant_1")
+        scrollClick("add_set")
+        scrollClick("complete_set_0")
+        scrollClick("complete_set_1")
+        click("participant_0")
+        click("workout_menu")
+        click("finish_person")
+        click("confirm_finish_person")
+        ui.waitUntil(12_000) { completed() == 1 }
+        withActiveFile { _, session ->
+            assertTrue(session.workout(athlete.id)?.cycleCredited == true)
+            assertEquals(date.toString(), session.date)
+            assertEquals(date.plusDays(1).toString(), session.scheduledFor)
+            assertEquals(WorkoutStatus.ACTIVE, session.workout(partner.id)?.status)
+            assertEquals(2, session.workout(partner.id)?.completed)
+            assertNull(session.workout(partner.id)?.cycleSlot)
+            val aerobic = session.workout(athlete.id)!!.exercises[1].athletes.single().sets
+            assertEquals(600.0, aerobic.first().actual!!.measurements.getValue(Measure.DURATION), 0.0)
+            assertEquals(SetStatus.SKIPPED, aerobic.last().status)
+            assertEquals(20.0, performance(listOf(session), athlete.id).first { it.exercise.name == "Жим цикла QA" }.maxKg, 0.0)
+        }
+        click("participant_1")
+        click("workout_menu")
+        click("finish_group")
+        click("confirm_finish")
+        await("start_training")
+        assertEquals(1, completed())
+        ui.onNodeWithText("Завершено 1 из 3").performScrollTo().assertIsDisplayed()
+        val zip = File(app.cacheDir, "qa-cycle-${newId()}.zip")
+        try {
+            runBlocking { repo.export(android.net.Uri.fromFile(zip), false) }
+            java.util.zip.ZipFile(zip).use { archive ->
+                val documents = archive.entries().asSequence().filter { it.name.endsWith(".md") }.mapNotNull { file ->
+                    archive.getInputStream(file).bufferedReader().use { Markdown.read(it.readText())?.document }
+                }.toList()
+                assertTrue(cycle in documents && calendar in documents)
+                assertEquals(1, cyclePosition(cycle, athlete.id, documents.filterIsInstance<Session>()).completed)
+            }
+        } finally { zip.delete() }
+        click("nav_program")
+        scrollClick("add_foundation_program")
+        ui.waitUntil(12_000) { runBlocking {
+            repo.library.first().programs.any { it.id == foundationProgramId && it.completionCycle?.targetSessions == 24 }
+        } }
+        ui.onNodeWithText("Силовой фундамент 8").performScrollTo().performClick()
+        screenshot("cycle-foundation")
+    }
+
+    @Test fun adaptiveMovementsPersistSeparatelyThroughSafAndExport() {
+        createVault()
+        selectFolder()
+        val main = Profile(name = "Движения QA")
+        val family = MovementFamily(name = "Семейство QA")
+        val base = Exercise(name = "Базовая тяга QA", load = Load.MACHINE, movement = MovementDetails(family.id))
+        val variant = Exercise(name = "Пауза QA", load = Load.MACHINE, movement = MovementDetails(
+            family.id, base.id, VariationType.PAUSE, measures = setOf(Measure.HOLD)))
+        val level = SkillLevel(name = "Удержание QA", goal = MovementGoal(Measure.HOLD, 12.0))
+        val skill = MovementSkill(name = "Контроль QA", levels = listOf(level))
+        writeFile("$path/inbound-family.md", Markdown.write(family))
+        val active = Session(title = "Движения QA", date = LocalDate.now().toString(), participants = listOf(main))
+            .start().addExercise(ExercisePlan(base, List(3) { SetPlan(20.0) }))
+        val repo = app.repository
+        runBlocking {
+            repo.refresh()
+            repo.update { listOf(main, base, variant, skill, active) }
+            repo.flush()
+        }
+        scrollClick("open_progression")
+        scrollClick("open_movements")
+        ui.onNodeWithText(family.name).performScrollTo().performClick()
+        screenshot("movements-family")
+        ui.onNodeWithText(base.name).performScrollTo().performClick()
+        scrollClick("movement_track")
+        scrollClick("track_role")
+        scrollClick("track_role_ACTIVE")
+        replace("track_target", "8")
+        hideKeyboard()
+        scrollClick("save_track")
+        ui.waitUntil(15_000) { runBlocking {
+            repo.library.first().movementTracks.any { it.profileId == main.id && it.exerciseId == base.id && it.role == MovementRole.ACTIVE }
+        } }
+        click("movement_back")
+        click("movement_back")
+        scrollClick("movement_tab_1")
+        ui.onNodeWithText("Фильтры каталога").performScrollTo().performClick()
+        scrollClick("filter_mastery")
+        scrollClick("filter_mastery_1")
+        ui.onNodeWithText("Упражнения не найдены.").performScrollTo().assertIsDisplayed()
+        scrollClick("movement_tab_2")
+        ui.onNodeWithText(skill.name).performScrollTo().performClick()
+        scrollClick("add_skill_attempt")
+        replace("skill_attempt_value", "14")
+        hideKeyboard()
+        scrollClick("save_skill_attempt")
+        ui.waitUntil(15_000) { ui.onAllNodesWithText("Критерий подтверждён").fetchSemanticsNodes().isNotEmpty() }
+        screenshot("movements-skill")
+        click("movement_back")
+        click("progression_back")
+        click("start_training")
+        scrollClick("complete_set_0")
+        click("workout_menu")
+        click("training_volume")
+        scrollClick("volume_MINIMUM")
+        withActiveFile { _, session -> assertEquals(2, session.defaultWorkout.exercises.single().athletes.single().sets.count { it.deferred }) }
+        click("workout_menu")
+        click("training_volume")
+        scrollClick("volume_NORMAL")
+        click("exercise_menu")
+        click("exercise_variations")
+        scrollClick("use_variation_${variant.id}")
+        ui.waitUntil(15_000) { ui.onAllNodesWithText(variant.name).fetchSemanticsNodes().isNotEmpty() }
+        scrollClick("complete_set_0")
+        replace("measure_HOLD", "14")
+        hideKeyboard()
+        screenshot("movements-set")
+        scrollClick("save_set")
+        withActiveFile { _, session ->
+            val workout = session.defaultWorkout
+            val row = workout.exercises.single()
+            assertEquals(3, workout.originalPlan?.single()?.sets?.size)
+            assertEquals(variant.id, row.exercise.id)
+            assertEquals(1, row.replaced.single().athletes.single().sets.count { it.status == SetStatus.COMPLETED })
+            val actual = row.athletes.single().sets.first().actual!!
+            assertFalse(actual.weightKnown)
+            assertFalse(actual.repsKnown)
+            assertEquals(14.0, actual.measurements.getValue(Measure.HOLD), 0.0)
+        }
+        ui.activityRule.scenario.recreate()
+        ui.waitUntil(15_000) { ui.onAllNodesWithText(variant.name).fetchSemanticsNodes().isNotEmpty() }
+        val zip = File(app.cacheDir, "qa-movements-${newId()}.zip")
+        try {
+            runBlocking { repo.export(android.net.Uri.fromFile(zip), false) }
+            java.util.zip.ZipFile(zip).use { archive ->
+                val documents = archive.entries().asSequence().filter { it.name.endsWith(".md") }.mapNotNull { file ->
+                    archive.getInputStream(file).bufferedReader().use { Markdown.read(it.readText())?.document }
+                }.toList()
+                assertTrue(family in documents && skill in documents)
+                assertEquals(14.0, documents.filterIsInstance<SkillAttempt>().single().value, 0.0)
+                assertEquals(MovementRole.ACTIVE, documents.filterIsInstance<MovementTrack>().single().role)
+            }
+        } finally { zip.delete() }
+    }
+
     @Test fun changesScheduledDayFromHomeWithOrWithoutSwap() {
         createVault()
         selectFolder()
@@ -299,7 +516,7 @@ class GymFlowScenarioTest {
         assertEquals(WorkoutStatus.CANCELLED, saved.workouts[2].status)
         assertEquals("Дополнительный подход QA", saved.workouts[2].exercises.last().replaced.single().exercise.name)
         val raw = shell("cat '$filename'")
-        assertTrue(raw.contains("gymflow_schema: 3"))
+        assertTrue(raw.contains("gymflow_schema: 5"))
         assertTrue(raw.contains("## Партнёр QA · Грудь QA"))
         assertTrue(raw.contains("21.5 × 9"))
         val edit = raw + "\n## Заметка Obsidian\n\n[[Журнал]]\n"
@@ -541,7 +758,7 @@ class GymFlowScenarioTest {
             app.repository.flush()
         }
         val upgraded = shell("cat '$file'")
-        assertTrue(upgraded.contains("gymflow_schema: 3"))
+        assertTrue(upgraded.contains("gymflow_schema: 5"))
         assertEquals(imported.workouts, (Markdown.read(upgraded)?.document as Session).workouts)
         val backups = File(app.filesDir, "markdown-backups").walkTopDown().filter { it.isFile }.toList()
         assertTrue(backups.any { it.readText() == original })
@@ -683,9 +900,34 @@ class GymFlowScenarioTest {
             device.dumpWindowHierarchy(file)
             error("Папка $folderName не видна в DocumentsUI")
         }
-        checkNotNull(target).click()
-        requireNotNull(device.wait(Until.findObject(By.text(Pattern.compile("Use this folder", Pattern.CASE_INSENSITIVE))), 5000)).click()
-        requireNotNull(device.wait(Until.findObject(By.text(Pattern.compile("Allow", Pattern.CASE_INSENSITIVE))), 5000)).click()
+        val useFolder = By.text(Pattern.compile("Use this folder", Pattern.CASE_INSENSITIVE))
+        val allow = By.text(Pattern.compile("Allow", Pattern.CASE_INSENSITIVE))
+        var confirm = false
+        repeat(3) {
+            if (!confirm) {
+                val row = requireNotNull(target) { "Test folder went off screen" }
+                val footer = device.findObject(useFolder)?.visibleBounds
+                if (footer != null && row.visibleBounds.centerY() >= footer.top - 16) {
+                    val x = device.displayWidth / 2
+                    device.swipe(x, footer.top - 30, x, maxOf(footer.top - 280, 150), 20)
+                    target = device.wait(Until.findObject(By.text(folderName)), 2500)
+                }
+                checkNotNull(target).click()
+                val button = device.wait(Until.findObject(useFolder), 1600)
+                if (device.findObject(allow) == null) button?.click()
+                val grant = device.wait(Until.findObject(allow), 2200)
+                if (grant != null) {
+                    if (device.hasObject(By.textContains(folderName))) {
+                        grant.click()
+                        confirm = true
+                    } else {
+                        device.pressBack()
+                        target = device.wait(Until.findObject(By.text(folderName)), 3000)
+                    }
+                }
+            }
+        }
+        check(confirm) { "DocumentsUI did not confirm the selected QA folder" }
         ui.waitUntil(15_000) { runBlocking { app.repository.settings.values.first().folder.contains(folderName) } }
         click("nav_home")
     }

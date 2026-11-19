@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
-fun ProgressionScreen(library: Library, model: GymModel, back: () -> Unit, prepare: (String?) -> Unit) {
+fun ProgressionScreen(library: Library, model: GymModel, back: () -> Unit, prepare: (String?) -> Unit, movements: () -> Unit) {
     var editing by rememberSaveable { mutableStateOf(false) }
     var profileId by rememberSaveable { mutableStateOf<String?>(null) }
     var exerciseId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -47,6 +47,9 @@ fun ProgressionScreen(library: Library, model: GymModel, back: () -> Unit, prepa
                 OutlinedButton(onClick = {
                     prepare(library.sessions.filter { it.status == SessionStatus.PLANNED }.minByOrNull { it.date }?.id)
                 }) { Text(stringResource(R.string.prepare_training)) }
+                OutlinedButton(onClick = movements, modifier = Modifier.testTag("open_movements")) {
+                    Text("Движения и навыки")
+                }
                 if (person != null) Choice(person, people, { it.name }, { profileId = it.id }, "progression_profile")
                 if (exercise != null) Choice(exercise, library.exercises, { it.name }, { exerciseId = it.id }, "progression_exercise")
                 if (person != null && exercise != null) {

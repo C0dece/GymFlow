@@ -21,7 +21,7 @@ import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 import kotlinx.coroutines.launch
 
-private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY }
+private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE }
 
 @Composable
 fun Workout(
@@ -82,6 +82,7 @@ private fun ColumnScope.ParticipantScreen(
     val exercises = chosen.exercises
     val entry = exercises.getOrNull(pager.currentPage)
     val athlete = entry?.athletes?.single()
+    val trainingBlock = chosen.trainingBlocks.find { it.id == entry?.plan?.blockId }
     val active = session.status == SessionStatus.ACTIVE && !reviewing
     val editable = active && chosen.canEdit
     val canCorrect = session.completedWorkouts(personId).any { it.id == chosen.id }
@@ -120,10 +121,21 @@ private fun ColumnScope.ParticipantScreen(
                 detached = true
                 current
             } else {
-                val updated = current.editAthlete(exerciseId, personId) { row ->
+                val exerciseEntry = activeWorkout.exercises.find { it.id == exerciseId }
+                val originalSet = exerciseEntry?.athletes?.single()?.sets?.find { it.id == result.id }
+                val base = if (originalSet != null && (result.plan != originalSet.plan || result.status == SetStatus.CANCELLED)) {
+                    current.editWorkoutById(chosen.id) { it.withOriginalPlan() }
+                } else current
+                val updated = base.editAthlete(exerciseId, personId) { row ->
                     row.copy(sets = row.sets.map { if (it.id == result.id) result else it })
                 }
-                val located = updated.editWorkout(personId) { it.copy(currentExerciseId = exerciseId) }
+                val rest = exerciseEntry?.plan?.restSeconds?.takeIf { exerciseEntry.plan.autoRest &&
+                    result.status == SetStatus.COMPLETED && originalSet?.status == SetStatus.PLANNED }
+                val located = updated.editWorkout(personId) {
+                    it.copy(currentExerciseId = exerciseId, restUntil = rest?.let { seconds ->
+                        java.time.Instant.now().plusSeconds(seconds.toLong()).toString()
+                    } ?: it.restUntil)
+                }
                 if (rotate && prefs.rotation && !pinned && result.status == SetStatus.COMPLETED) {
                     next = nextWorkout(located, personId)
                     next?.let { target ->
@@ -193,6 +205,7 @@ private fun ColumnScope.ParticipantScreen(
                         }
                     }
                     Action(stringResource(R.string.workout_details)) { open(Sheet.METRICS) }
+                    if (editable) Action("Объём тренировки", "training_volume") { open(Sheet.VOLUME) }
                     if (canCorrect) Action(stringResource(R.string.correct_results), "correct_results") { menu = false; correcting = true }
                     if (editable) {
                         Action(stringResource(R.string.finish_person), "finish_person") { open(Sheet.FINISH_PERSON) }
@@ -239,6 +252,10 @@ private fun ColumnScope.ParticipantScreen(
             Text(stringResource(R.string.exercise_progress, pager.currentPage + 1, exercises.size),
                 style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
         }
+        if (trainingBlock != null) Muted(trainingBlock.name)
+        if (editable) RestTimer(chosen.restUntil, entry?.plan?.restSeconds) { seconds ->
+            edit { it.copy(restUntil = seconds?.let { value -> java.time.Instant.now().plusSeconds(value.toLong()).toString() }) }
+        }
         LinearProgressIndicator(progress = { if (total == 0) 0f else completed.toFloat() / total }, modifier = Modifier.fillMaxWidth().height(5.dp))
     }
     HorizontalPager(
@@ -274,6 +291,20 @@ private fun ColumnScope.ParticipantScreen(
                             }
                             DropdownMenu(more, { more = false }) {
                                 Action(stringResource(R.string.replace_exercise)) { open(Sheet.REPLACE) }
+                                if ((library.exercises.find { it.id == current.exercise.id } ?: current.exercise).movement?.familyId != null) {
+                                    Action("Вариации семейства", "exercise_variations") { open(Sheet.VARIATION) }
+                                }
+                                Action("Проверить нагрузку", "training_advice") { open(Sheet.ADVICE) }
+                                chosen.trainingBlocks.find { it.id == current.plan.blockId && it.requirement != PlanBlock.REQUIRED }?.let { block ->
+                                    Action("Пропустить блок", "skip_training_block") {
+                                        more = false
+                                        edit { it.skipBlock(block.id) }
+                                    }
+                                }
+                                Action("Убрать из текущего плана", "discard_exercise") {
+                                    more = false
+                                    edit { it.discardExercise(current.id) }
+                                }
                                 Action(stringResource(if (row.skipped) R.string.restore_exercise else R.string.skip_exercise), "skip_exercise") {
                                     more = false
                                     edit { w -> w.editExercise(current.id) { e -> e.copy(athletes = listOf(e.athletes.single().let { it.copy(skipped = !it.skipped) })) } }
@@ -288,7 +319,7 @@ private fun ColumnScope.ParticipantScreen(
                     }
                 },
                 toggle = { set ->
-                    if (set.status != SetStatus.COMPLETED && (!set.proposed.weightKnown || !set.proposed.repsKnown)) {
+                    if (set.status != SetStatus.COMPLETED && (!set.proposed.weightKnown || !set.proposed.repsKnown || !current.exercise.movement?.measures.isNullOrEmpty() || current.exercise.cardio != null)) {
                         editing = set.id
                         open(Sheet.SET)
                     } else record(current.id, set.toggle(), rotate = true)
@@ -299,13 +330,13 @@ private fun ColumnScope.ParticipantScreen(
                 } },
                 addSet = { if (canCorrect && correcting) {
                     val plan = row.sets.lastOrNull()?.plan ?: SetPlan(prefs.initialWeight, prefs.minReps, prefs.maxReps)
-                    extraSet = SetEntry(plan = plan.copy(warmup = false))
+                    extraSet = SetEntry(plan = plan.copy(warmup = false, role = SetRole.WORK))
                     editing = extraSet?.id
                     open(Sheet.SET)
                 } else model.session(session.id) {
-                    it.editAthlete(current.id, personId) { a ->
+                    it.editWorkoutById(chosen.id, ParticipantWorkout::withOriginalPlan).editAthlete(current.id, personId) { a ->
                         val plan = a.sets.lastOrNull()?.plan ?: SetPlan(prefs.initialWeight, prefs.minReps, prefs.maxReps)
-                        a.copy(sets = a.sets + SetEntry(plan = plan.copy(warmup = false)))
+                        a.copy(sets = a.sets + SetEntry(plan = plan.copy(warmup = false, role = SetRole.WORK)))
                     }
                 } },
             )
@@ -365,7 +396,9 @@ private fun ColumnScope.ParticipantScreen(
                     close()
                 }) { value ->
                     if (replace && entry != null) value.editWorkout(personId) { it.replaceExercise(entry.id, plan) }
-                    else value.addExercise(plan, value.workouts.filter { it.canEdit && it.profile.id in selection }.map { it.profile.id }.toSet())
+                    else value.copy(workouts = value.workouts.map { row ->
+                        if (row.canEdit && row.profile.id in selection) row.withOriginalPlan().addExercise(plan) else row
+                    })
                 }
             }
         }
@@ -373,10 +406,10 @@ private fun ColumnScope.ParticipantScreen(
             TemplatePicker(library.programs, template) { template = it }
         }) { added, permanent ->
             val selectedTemplate = template
-            model.session(session.id, if (permanent) listOf(added) else emptyList(), onSaved = {
+            model.addWorkoutParticipant(session.id, added, selectedTemplate, permanent) {
                 close()
                 choose(added.id, null)
-            }) { it.addParticipant(added, selectedTemplate) }
+            }
         }
         Sheet.ASSIGN -> EditorSheet(stringResource(R.string.assign_program), close) {
             TemplatePicker(library.programs, template) { template = it }
@@ -397,6 +430,18 @@ private fun ColumnScope.ParticipantScreen(
                 model.session(session.id, onSaved = close) { it.copy(notes = notes).editWorkout(personId) { w -> w.copy(metrics = metrics) } }
             }
         } else MetricsSummary(session, profile, close, chosen.metrics)
+        Sheet.VOLUME -> VolumeSheet(chosen, close) { mode ->
+            model.session(session.id, onSaved = close) { it.editWorkoutById(chosen.id) { row -> applyVolume(row, mode) } }
+        }
+        Sheet.VARIATION -> if (entry != null) VariationSheet(entry, chosen, library, close) { plan ->
+            model.session(session.id, onSaved = close) { it.editWorkoutById(chosen.id) { row -> row.replaceExercise(entry.id, plan) } }
+        }
+        Sheet.ADVICE -> if (entry != null) AdviceSheet(entry, chosen, library, close, edit = {
+            editing = it.id
+            open(Sheet.SET)
+        }, finish = {
+            model.session(session.id, onSaved = close) { it.editWorkoutById(chosen.id) { row -> row.discardExercise(entry.id) } }
+        }, variations = { open(Sheet.VARIATION) })
         Sheet.DAY -> if (program != null) {
             val options = remember(library.sessions, session, personId) { workoutDays(library.sessions, session, personId) }
             WorkoutDaySheet(program, profile, chosen, options, close, start = { dayId ->
@@ -413,7 +458,7 @@ private fun ColumnScope.ParticipantScreen(
             title = { Text(stringResource(R.string.finish_person)) },
             text = { Text(stringResource(R.string.individual_finish_message, profile.name, chosen.remaining)) },
             confirmButton = { Button(onClick = { model.session(session.id, onSaved = close) {
-                it.editWorkout(personId) { w -> w.copy(status = WorkoutStatus.COMPLETED) }
+                it.editWorkout(personId) { w -> w.copy(status = WorkoutStatus.COMPLETED, restUntil = null) }
             } }, modifier = Modifier.testTag("confirm_finish_person")) { Text(stringResource(R.string.finish)) } },
             dismissButton = { TextButton(onClick = close) { Text(stringResource(R.string.cancel)) } },
         )

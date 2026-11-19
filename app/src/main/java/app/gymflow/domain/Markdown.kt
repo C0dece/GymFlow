@@ -17,7 +17,7 @@ interface DocumentCodec {
 data class MarkdownDocument(val document: Document, val freeText: String, val extraYaml: Map<String, String> = emptyMap())
 
 object Markdown : DocumentCodec {
-    const val schema = 3
+    const val schema = 5
     private const val open = "<!-- gymflow:json"
     private const val close = "gymflow:json -->"
     private const val reportStart = "<!-- gymflow:report -->"
@@ -130,6 +130,10 @@ object Markdown : DocumentCodec {
         is Exercise -> "exercise"
         is ProgressionPolicy -> "progression_policy"
         is ProgressionReview -> "progression_review"
+        is MovementFamily -> "movement_family"
+        is MovementTrack -> "movement_track"
+        is MovementSkill -> "movement_skill"
+        is SkillAttempt -> "skill_attempt"
     }
 
     private fun validate(document: Document) {
@@ -137,6 +141,7 @@ object Markdown : DocumentCodec {
         when (document) {
             is Session -> {
                 LocalDate.parse(document.date)
+                document.scheduledFor?.let(LocalDate::parse)
                 document.started?.let(Instant::parse)
                 document.finished?.let(Instant::parse)
                 require(document.participants.isNotEmpty())
@@ -155,12 +160,23 @@ object Markdown : DocumentCodec {
                     require(workout.exercises.distinctBy { it.id }.size == workout.exercises.size)
                     require(workout.currentExerciseId == null || workout.exercises.any { it.id == workout.currentExerciseId })
                     workout.exercises.forEach { validateEntry(it, setOf(workout.profile.id)) }
+                    workout.originalPlan.orEmpty().forEach(::validatePlan)
+                    workout.restUntil?.let(Instant::parse)
+                    require(workout.cycleSlot == null || workout.cycleSlot.templateId == workout.templateId)
+                    require(!workout.cycleCredited || workout.cycleSlot != null && workout.status == WorkoutStatus.COMPLETED)
+                    require(workout.trainingBlocks.distinctBy { it.id }.size == workout.trainingBlocks.size)
                 }
             }
             is Program -> {
                 LocalDate.parse(document.anchor)
                 require(document.interval > 0 && document.days.distinctBy { it.id }.size == document.days.size)
-                document.days.flatMap { it.exercises }.forEach(::validatePlan)
+                require(document.completionCycle == null || document.cycle)
+                document.days.forEach { day ->
+                    val blocks = day.blocks.map { it.id }.toSet()
+                    require(blocks.size == day.blocks.size)
+                    require(day.exercises.all { it.blockId == null || it.blockId in blocks })
+                    day.exercises.forEach(::validatePlan)
+                }
             }
             is ProgressionPolicy -> require(document.id == document.scope.documentId())
             is ProgressionReview -> {
@@ -169,6 +185,7 @@ object Markdown : DocumentCodec {
                 require(document.decisions.all { it.profileId == document.profileId })
                 document.decisions.forEach { (it.baseline + it.proposed).forEach(::validateSet) }
             }
+            is MovementFamily, is MovementSkill, is MovementTrack, is SkillAttempt -> Unit
             is Profile -> require(document.name.isNotBlank())
             is Exercise -> require(document.name.isNotBlank() && document.repsMin in 1..document.repsMax)
         }
@@ -193,7 +210,11 @@ object Markdown : DocumentCodec {
             athlete.sets.forEach {
                 validateSet(it.plan)
                 require(it.status != SetStatus.COMPLETED || it.actual != null)
-                it.actual?.let { actual -> require(actual.weight.isFinite() && actual.weight >= 0 && actual.reps > 0) }
+                require(!it.deferred || it.status == SetStatus.CANCELLED)
+                it.actual?.let { actual ->
+                    require(actual.weight.isFinite() && actual.weight >= 0 && actual.reps > 0)
+                    require(actual.measurements.all { (kind, value) -> kind in Measure.extra && kind.accepts(value) })
+                }
             }
         }
         entry.replaced.forEach { validateEntry(it, participants) }
@@ -230,6 +251,10 @@ object Markdown : DocumentCodec {
         is Session -> sessionReport(document)
         is Profile -> "# ${md(document.name)}\n\nПрофиль участника"
         is ProgressionPolicy -> "# Правила прогрессии\n\nСтратегия: ${document.ruleSet.strategy}. Версия: ${document.version}."
+        is MovementFamily -> "# ${md(document.name)}\n\n${md(document.notes)}"
+        is MovementTrack -> "# ${document.role.label}\n\n${document.exerciseId} · ${document.profileId}"
+        is MovementSkill -> "# ${md(document.name)}\n\n" + document.levels.joinToString("\n") { "- ${md(it.name)} · ${it.goal.measure.label} · ${it.goal.target}" }
+        is SkillAttempt -> "# ${document.date}\n\n${document.measure.label} · ${document.value}\n\n${md(document.note)}"
         is ProgressionReview -> buildString {
             appendLine("# Рекомендации от ${document.date}")
             document.decisions.forEach { item ->
@@ -241,13 +266,22 @@ object Markdown : DocumentCodec {
         is Program -> buildString {
             appendLine("# ${md(document.title)}")
             appendLine()
-            if (document.cycle) appendLine("Цикл с интервалом ${document.interval} дн., начало ${document.anchor}.")
+            val cycle = document.completionCycle
+            if (cycle != null) {
+                appendLine("Цикл по завершённым занятиям. Посещений в неделю: ${cycle.visitsPerWeek}.")
+                cycle.targetSessions?.let { appendLine("Цель: $it завершённых занятий.") }
+            } else if (document.cycle) appendLine("Цикл с интервалом ${document.interval} дн., начало ${document.anchor}.")
+            if (document.caution.isNotBlank()) appendLine("> " + md(document.caution))
             document.days.forEach { day ->
                 val weekday = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")[day.weekday.ordinal]
                 appendLine()
                 appendLine("## ${md(day.title)}${if (document.cycle) "" else " ($weekday)"}")
+                day.blocks.forEach { block ->
+                    appendLine("- ${md(block.name)}: ${block.requirement.label}. ${md(block.guidance)}")
+                }
                 day.exercises.forEach { plan ->
-                    appendLine("- ${md(plan.exercise.name)}: ${plan.sets.joinToString(transform = ::planText)}")
+                    val details = plan.restSeconds?.let { ". Отдых $it с" }.orEmpty()
+                    appendLine("- ${md(plan.exercise.name)}: ${plan.sets.joinToString(transform = ::planText)}$details")
                 }
             }
         }.trimEnd()
@@ -281,10 +315,13 @@ object Markdown : DocumentCodec {
                     appendLine("| Подход | План | Факт | Статус | Заметка |")
                     appendLine("| --- | ---: | ---: | --- | --- |")
                     athlete.sets.forEachIndexed { index, set ->
-                        val label = if (set.plan.warmup) "Разминка" else (index + 1).toString()
+                        val label = if (set.plan.purpose == SetRole.WORK) (index + 1).toString() else set.plan.purpose.label
                         val actual = set.actual?.takeIf { set.status == SetStatus.COMPLETED }
                         val result = actual?.let {
-                            "${if (it.weightKnown) number(it.weight) else "?"} × ${if (it.repsKnown) it.reps else "?"}"
+                            val weights = "${if (it.weightKnown) number(it.weight) else "?"} × ${if (it.repsKnown) it.reps else "?"}"
+                            val measured = it.measurements.entries.joinToString(" · ") { (kind, value) -> "${kind.label}: ${number(value)}" }
+                            val showWeights = it.weightKnown || it.repsKnown || measured.isEmpty()
+                            listOfNotNull(weights.takeIf { showWeights }, measured.takeIf { it.isNotEmpty() }).joinToString(" · ")
                         }.orEmpty()
                         val status = when (set.status) {
                             SetStatus.PLANNED -> "План"

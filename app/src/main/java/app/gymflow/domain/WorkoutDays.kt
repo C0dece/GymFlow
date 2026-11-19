@@ -57,7 +57,10 @@ internal fun startWorkoutDay(
         ?: Profile(id = profileId, name = "")
     val workout = existing?.workout ?: ParticipantWorkout(profile = memberProfile).withTemplate(day)
     if (origin?.status == SessionStatus.ACTIVE || origin?.status == SessionStatus.PLANNED) {
-        val active = if (origin.status == SessionStatus.PLANNED) origin.copy(status = SessionStatus.ACTIVE, started = now.toString(), date = today.toString()) else origin
+        val plan = if (program.completionCycle != null) origin.onCycleVisit(today) else origin
+        val active = if (plan.status == SessionStatus.PLANNED) {
+            plan.copy(status = SessionStatus.ACTIVE, started = now.toString(), date = today.toString())
+        } else plan
         val updated = active.selectWorkout(workout)
         val paused = source.takeIf { it.id != origin.id && it.status == SessionStatus.ACTIVE }?.editWorkout(profileId) {
             if (it.canEdit) it.copy(status = WorkoutStatus.PAUSED) else it

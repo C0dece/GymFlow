@@ -36,6 +36,7 @@ fun PlanPreview(
     }
     var personId by rememberSaveable { mutableStateOf(draft.defaultWorkout.profile.id) }
     var editing by remember { mutableStateOf<String?>(null) }
+    var variation by remember { mutableStateOf<String?>(null) }
     val current = draft.workout(personId) ?: draft.workouts.first()
     val engine by rememberEngine(library)
     val program = library.programs.find { p -> p.days.any { it.id == current.templateId } }?.id ?: draft.programId
@@ -88,15 +89,24 @@ fun PlanPreview(
                     .let { next -> next.copy(progression = next.progression.filterNot { it.participantId == current.profile.id }) }
             }
             if (current.templateNotes.isNotBlank()) Muted(current.templateNotes)
+            library.programs.find { it.id == program }?.caution?.takeIf { it.isNotBlank() }?.let {
+                InlineStatus(it, warning = true)
+            }
             val volumes = current.exercises.flatMap { item -> item.athletes.single().sets.map { it.plan.volumeKg(item.exercise) } }
             val known = volumes.filterNotNull()
             if (known.isNotEmpty()) Muted(stringResource(if (known.size == volumes.size) R.string.plan_workload else R.string.plan_known_workload,
                 number(known.sum())))
             if (current.exercises.isEmpty()) Muted(stringResource(R.string.plan_empty))
             current.exercises.forEachIndexed { index, item ->
+                val block = current.trainingBlocks.find { it.id == item.plan.blockId }
+                if (block != null && current.exercises.getOrNull(index - 1)?.plan?.blockId != block.id) {
+                    SectionTitle(block.name)
+                    if (block.guidance.isNotBlank()) Muted(block.guidance)
+                    if (block.requirement != PlanBlock.REQUIRED) Muted(block.requirement.label)
+                }
                 key(item.id) {
                     var expanded by rememberSaveable { mutableStateOf(false) }
-                    val previous = references[item.exercise.id]?.takeIf { it.exercise.load == item.exercise.load }
+                    val previous = references[item.exercise.id]?.takeIf { it.exercise.comparableWith(item.exercise) }
                     CardBlock {
                         TextButton(onClick = { expanded = !expanded },
                             modifier = Modifier.fillMaxWidth().testTag("plan_exercise_$index")) {
@@ -113,6 +123,8 @@ fun PlanPreview(
                             previous?.actuals?.lastOrNull()?.let {
                                 Muted(stringResource(R.string.last_result, actualText(it, previous.exercise)))
                             }
+                            if (item.plan.caution.isNotBlank()) InlineStatus(item.plan.caution, warning = true)
+                            item.plan.restSeconds?.let { Muted("Рекомендуемый отдых · $it с") }
                             val receipt = draft.progression.find { it.participantId == current.profile.id && it.exerciseEntryId == item.id }
                             val active = engine
                             val decision = receipt?.decision ?: remember(active, current.profile.id, item.plan, program, continuationTemplate) {
@@ -132,6 +144,13 @@ fun PlanPreview(
                                         modifier = Modifier.testTag("keep_progression_$index")) { Text(stringResource(R.string.keep_progression)) }
                                 }
                             }
+                            if (item.plan.block != PlanBlock.REQUIRED) Muted(item.plan.block.label)
+                            library.skills.find { it.id == item.plan.skillId }?.let { Muted("Навык · " + it.name) }
+                            if ((library.exercises.find { it.id == item.exercise.id } ?: item.exercise).movement?.familyId != null) {
+                                TextButton(onClick = { variation = item.id }, modifier = Modifier.testTag("preview_variation_$index")) {
+                                    Text(if (item.plan.selection == MovementSelection.FIXED) "Выбрать вариацию" else item.plan.selection.label)
+                                }
+                            }
                             TextButton(onClick = { editing = item.id }, modifier = Modifier.testTag("manual_progression_$index")) {
                                 Text(stringResource(if (decision == null) R.string.change else R.string.change_progression))
                             }
@@ -140,6 +159,16 @@ fun PlanPreview(
                 }
             }
             OutlinedButton(onClick = { editing = "new" }) { Text(stringResource(R.string.add_exercise)) }
+        }
+    }
+    current.exercises.find { it.id == variation }?.let { entry ->
+        VariationSheet(entry, current, library, { variation = null }) { plan ->
+            draft = draft.editWorkout(current.profile.id) { it.replaceExercise(entry.id, plan) }.let { updated ->
+                updated.copy(progression = updated.progression.filterNot {
+                    it.participantId == current.profile.id && it.exerciseEntryId == entry.id
+                })
+            }
+            variation = null
         }
     }
     editing?.let { id ->
@@ -208,5 +237,9 @@ fun plannedSetText(plan: SetPlan, exercise: Exercise): String {
 fun actualText(actual: Actual, exercise: Exercise): String {
     val weight = if (actual.weightKnown) number(actual.weight) else stringResource(R.string.unknown_value)
     val reps = if (actual.repsKnown) actual.reps.toString() else stringResource(R.string.unknown_value)
-    return "$weight ${unitText(exercise.unit)} × $reps"
+    if (!actual.weightKnown && !actual.repsKnown && actual.measurements.isNotEmpty()) {
+        return actual.measurements.entries.joinToString(" · ") { (kind, value) -> "${kind.label}: ${number(value)}" }
+    }
+    val measured = actual.measurements.entries.joinToString(" · ") { (kind, value) -> "${kind.label}: ${number(value)}" }
+    return listOf("$weight ${unitText(exercise.unit)} × $reps", measured).filter { it.isNotEmpty() }.joinToString(" · ")
 }

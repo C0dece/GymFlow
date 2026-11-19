@@ -55,6 +55,66 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun save(document: Document) { commands.trySend { repo.save(document); if (document is Program) repo.schedule(); flush.trySend(Unit) } }
+    fun addMovementExamples() {
+        commands.trySend {
+            repo.update { state ->
+                val names = listOf("Вертикальная тяга", "Горизонтальная тяга", "Горизонтальный жим", "Стабилизация корпуса")
+                val families = names.map { name ->
+                    state.families.find { it.name.equals(name, true) } ?: MovementFamily(stableId("movement-example/$name"), name)
+                }
+                val examples = listOf(
+                    Exercise(id = stableId("movement-example/pulldown"), name = "Тяга верхнего блока", load = Load.MACHINE,
+                        muscle = "Широчайшие, бицепс", movement = MovementDetails(familyId = families[0].id, equipment = "Блок", quality = Quality.STRENGTH)),
+                    Exercise(id = stableId("movement-example/plank"), name = "Планка на предплечьях", load = Load.BODYWEIGHT,
+                        muscle = "Мышцы корпуса", movement = MovementDetails(familyId = families[3].id, quality = Quality.CONTROL, measures = setOf(Measure.HOLD))),
+                ).filter { example -> state.exercises.none { it.id == example.id || it.name.equals(example.name, true) } }
+                families.filter { candidate -> state.families.none { it.id == candidate.id } } + examples
+            }
+            flush.trySend(Unit)
+        }
+    }
+
+    fun saveMovement(exercise: Exercise, onSaved: () -> Unit) {
+        commands.trySend {
+            repo.update { state ->
+                val details = exercise.movement
+                val existing = state.exercises.associateBy { it.id }
+                check(existing.values.none { it.id != exercise.id && it.name.equals(exercise.name, true) }) { "Упражнение с таким названием уже есть" }
+                check(details?.familyId == null || state.families.any { it.id == details.familyId }) { "Семейство не найдено" }
+                val parent = details?.parentId?.let { requireNotNull(existing[it]) }
+                check(parent == null || parent.movement?.familyId == details?.familyId) { "Исходное упражнение из другого семейства" }
+                val visited = mutableSetOf(exercise.id)
+                var cursor = parent
+                while (cursor != null) {
+                    check(visited.add(cursor.id)) { "Связь с исходным упражнением образует цикл" }
+                    cursor = existing[cursor.movement?.parentId]
+                }
+                check(existing.values.none { it.movement?.parentId == exercise.id && it.movement.familyId != details?.familyId }) {
+                    "Сначала перенесите связанные вариации"
+                }
+                listOf(exercise)
+            }
+            flush.trySend(Unit)
+            onSaved()
+        }
+    }
+
+    fun saveMovementTrack(track: MovementTrack, onSaved: () -> Unit) {
+        commands.trySend {
+            repo.update { state ->
+                val familyId = state.exercises.find { it.id == track.exerciseId }?.movement?.familyId
+                val oldAnchors = if (track.role == MovementRole.ANCHOR && familyId != null) {
+                    val members = state.exercises.filter { it.movement?.familyId == familyId }.mapTo(hashSetOf()) { it.id }
+                    state.movementTracks.filter { it.id != track.id && it.profileId == track.profileId &&
+                        it.role == MovementRole.ANCHOR && it.exerciseId in members }
+                } else emptyList()
+                oldAnchors.map { it.copy(role = MovementRole.RESERVE) } + track
+            }
+            flush.trySend(Unit)
+            onSaved()
+        }
+    }
+
     fun edit(id: String, transform: (Document) -> Document) {
         commands.trySend { repo.editDocument(id, transform); repo.schedule(); flush.trySend(Unit) }
     }
@@ -73,6 +133,98 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
 
     private var creating = false
 
+    fun addFoundationProgram() {
+        commands.trySend {
+            repo.update { state ->
+                if (state.programs.any { it.id == foundationProgramId }) emptyList()
+                else {
+                    val (program, exercises) = foundationProgram(state.exercises, LocalDate.now())
+                    val primary = state.availableProfiles.find { it.id == preferences.value.athlete } ?: state.availableProfiles.firstOrNull()
+                    val profile = primary ?: Profile(name = app.getString(R.string.self))
+                    exercises + program.copy(participantIds = listOf(profile.id)) + listOfNotNull(profile.takeIf { primary == null })
+                }
+            }
+            repo.schedule()
+            flush.trySend(Unit)
+        }
+    }
+
+    fun prepareCycle(programId: String, profileId: String, dayId: String?, open: (String, Boolean) -> Unit) {
+        var active = false
+        create({ open(it, active) }) { state ->
+            val program = requireNotNull(state.programs.find { it.id == programId && it.completionCycle != null })
+            val profile = requireNotNull(state.availableProfiles.find { it.id == profileId })
+            val position = cyclePosition(program, profileId, state.sessions)
+            val day = requireNotNull(dayId?.let { id -> program.days.find { it.id == id } } ?: position.next) {
+                "Цикл завершён. Продолжите программу или выберите другой день."
+            }
+            val advance = position.next?.id == day.id
+            val pending = position.pending?.takeIf { advance && it.workout.templateId == day.id }
+            if (pending != null) {
+                if (pending.workout in pending.session.otherWorkouts) {
+                    val change = startWorkoutDay(pending.session, profileId, program, day, WorkoutDayOptions(pending = pending))
+                    active = true
+                    change.destination to change.documents.filterNot { it.id == change.destination.id }
+                } else {
+                    active = pending.session.status == SessionStatus.ACTIVE
+                    pending.session to emptyList()
+                }
+            } else {
+                val draft = cycleAppointment(program, profile, day, LocalDate.now(), position, advance)
+                val old = state.sessions.find { it.id == draft.id }
+                when (old?.status) {
+                    SessionStatus.ACTIVE -> { active = true; old to emptyList() }
+                    SessionStatus.PLANNED -> old to emptyList()
+                    SessionStatus.SKIPPED -> old.copy(status = SessionStatus.PLANNED,
+                        workouts = old.workouts.map { it.copy(status = WorkoutStatus.PLANNED) }) to emptyList()
+                    SessionStatus.COMPLETED -> draft.copy(id = newId()) to emptyList()
+                    null -> draft to emptyList()
+                }
+            }
+        }
+    }
+
+    fun extendCycle(programId: String, profileId: String) {
+        commands.trySend {
+            repo.update { state ->
+                val program = state.programs.find { it.id == programId } ?: return@update emptyList()
+                val config = program.completionCycle ?: return@update emptyList()
+                val position = cyclePosition(program, profileId, state.sessions)
+                if (position.limit == null || position.completed < position.limit) return@update emptyList()
+                listOf(program.copy(completionCycle = config.copy(
+                    extensions = config.extensions + (profileId to ((config.extensions[profileId] ?: 0) + 1)))))
+            }
+            flush.trySend(Unit)
+        }
+    }
+
+    fun addWorkoutParticipant(sessionId: String, profile: Profile, template: WorkoutTemplate?, permanent: Boolean, onSaved: () -> Unit) {
+        commands.trySend {
+            repo.update { state ->
+                val source = state.sessions.find { it.id == sessionId && it.status == SessionStatus.ACTIVE }
+                    ?: error(app.getString(R.string.session_missing))
+                val joined = source.addParticipant(profile, template)
+                val program = state.programs.find { it.completionCycle != null && it.days.any { day -> day.id == template?.id } }
+                val position = program?.let { cyclePosition(it, profile.id, state.sessions) }
+                val pending = position?.pending
+                val chosen = if (program != null && position?.next?.id == template?.id && template != null &&
+                    (pending == null || pending.session.status == SessionStatus.PLANNED)) {
+                    joined.editWorkout(profile.id) { row ->
+                        pending?.workout?.copy(status = WorkoutStatus.ACTIVE) ?: row.copy(
+                            cycleSlot = CycleSlot(program.id, template.id, requireNotNull(position).completed + 1))
+                    }
+                } else joined
+                val moved = pending?.takeIf { it.workout.id == chosen.workout(profile.id)?.id }
+                val retired = moved?.session?.copy(status = SessionStatus.SKIPPED,
+                    workouts = moved.session.workouts.map { it.copy(status = WorkoutStatus.SKIPPED, cycleSlot = null) })
+                val receipts = moved?.session?.progression.orEmpty()
+                listOfNotNull(retired, chosen.copy(progression = chosen.progression + receipts), profile.takeIf { permanent })
+            }
+            flush.trySend(Unit)
+            onSaved()
+        }
+    }
+
     fun switchDay(sessionId: String, profileId: String, dayId: String, open: (String) -> Unit) {
         if (creating) return
         creating = true
@@ -85,7 +237,15 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
                         ?: error(app.getString(R.string.plan_changed))
                     val day = program.days.first { it.id == dayId }
                     val options = workoutDays(state.sessions, source, profileId)[dayId] ?: WorkoutDayOptions()
-                    startWorkoutDay(source, profileId, program, day, options).also { destination = it.destination }.documents
+                    val changed = startWorkoutDay(source, profileId, program, day, options)
+                    val position = program.completionCycle?.let { cyclePosition(program, profileId, state.sessions) }
+                    destination = changed.destination
+                    if (options.pending == null && options.planned == null && position?.next?.id == day.id && position.pending == null) {
+                        destination = destination.editWorkout(profileId) {
+                            it.copy(cycleSlot = CycleSlot(program.id, day.id, position.completed + 1))
+                        }
+                    }
+                    changed.documents.filterNot { it.id == destination.id } + destination
                 }
                 flush.trySend(Unit)
                 val target = destination.workout(profileId)?.id
@@ -106,12 +266,18 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
                     ?: state.programs.find { p -> p.days.any { it.id == dayId } })
                 val day = program.days.first { it.id == dayId }
                 check(dayId !in otherPlannedDayIds(source, profileId, state.sessions)) { app.getString(R.string.plan_changed) }
-                val swap = swapDate?.let {
+                val swap = swapDate?.takeIf { program.completionCycle == null }?.let {
                     nextPlannedDay(program, day, LocalDate.parse(source.date), profileId, state.sessions).also { slot ->
                         check(slot?.date == it) { app.getString(R.string.plan_changed) }
                     }
                 }
-                changePlannedWorkout(source, profileId, program, day, swap)
+                val changed = changePlannedWorkout(source, profileId, program, day, swap)
+                val position = program.completionCycle?.let { cyclePosition(program, profileId, state.sessions) }
+                if (position?.next?.id == dayId && (position.pending == null || position.pending.session.id == source.id)) {
+                    changed.map { session -> session.editWorkout(profileId) {
+                        it.copy(cycleSlot = CycleSlot(program.id, dayId, position.completed + 1))
+                    } }
+                } else changed
             }
             flush.trySend(Unit)
             onSaved()
@@ -148,7 +314,8 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         if (id != null) {
             val existing = state.sessions.find { it.id == id && it.status in setOf(SessionStatus.PLANNED, SessionStatus.ACTIVE) }
                 ?: error(app.getString(R.string.session_missing))
-            existing.start() to emptyList()
+            val plan = if (existing.workouts.any { it.cycleSlot != null }) existing.onCycleVisit(LocalDate.now()) else existing
+            plan.start() to emptyList()
         } else {
             val self = state.availableProfiles.find { it.id == preferences.value.athlete } ?: state.availableProfiles.firstOrNull()
             val profile = self ?: Profile(name = app.getString(R.string.self))
@@ -165,7 +332,10 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         val people = state.profiles.map { it.id }.toSet()
         val catalog = state.exercises.map { it.id }.toSet()
         val newExercises = draft.workouts.flatMap { it.exercises }.map { it.exercise }.distinctBy { it.id }.filter { it.id !in catalog }
-        (if (start) draft.start() else draft) to (draft.participants.filter { it.id !in people } + newExercises)
+        val cycle = draft.workouts.any { it.cycleSlot != null } ||
+            state.programs.any { it.id == draft.programId && it.completionCycle != null }
+        val planned = if (start && cycle) draft.onCycleVisit(LocalDate.now()) else draft
+        (if (start) planned.start() else planned) to (draft.participants.filter { it.id !in people } + newExercises)
     }
 
     fun savePersonalPlan(workout: ParticipantWorkout, program: Program?, day: WorkoutTemplate?, sessionTitle: String) {

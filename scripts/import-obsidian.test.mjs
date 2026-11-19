@@ -35,7 +35,7 @@ test('W44 becomes independent planned weights and W43 preserves only recorded va
     assert.equal(marks[1][0].actual.weightKnown, false);
     assert.equal(marks[1][1].actual, null);
     assert.equal(bundle.program.id, convert(w43, w44).program.id);
-    assert.match(markdown(bundle.sessions[0]), /^---\ngymflow_schema: 2\n/);
+    assert.match(markdown(bundle.sessions[0]), /^---\ngymflow_schema: 3\n/);
 });
 
 test('a plan file cannot be substituted for completed history', () => {

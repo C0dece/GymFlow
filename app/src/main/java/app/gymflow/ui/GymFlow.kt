@@ -45,7 +45,7 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val nav = rememberNavController()
     val entry by nav.currentBackStackEntryAsState()
-    val workout = entry?.destination?.route in setOf(workoutRoute, "plan/{id}", "progression")
+    val workout = entry?.destination?.route in setOf(workoutRoute, "plan/{id}", "progression", "movements")
     val selected = Page.entries.find { it.route == entry?.destination?.route } ?: Page.HOME
     val selectFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) model.connect(uri)
@@ -113,6 +113,10 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
                     Home(library, preferences, status, { selectFolder.launch(null) }, open, preview, repeat, progression,
                         openDays = { id -> nav.navigate("workout/$id?days=true") { launchSingleTop = true } },
                         changePlannedDay = model::changePlannedDay,
+                        prepareCycle = { program, profile, day -> model.prepareCycle(program.id, profile.id, day) { id, active ->
+                            if (active) nav.navigate("workout/$id?profile=${profile.id}") { launchSingleTop = true } else preview(id)
+                        } },
+                        extendCycle = { program, profile -> model.extendCycle(program.id, profile.id) },
                     ) { id ->
                         model.start(id, open = open)
                     }
@@ -120,7 +124,10 @@ fun GymFlow(model: GymModel, applySystemBars: (Boolean) -> Unit) {
                 composable("program") { Programs(library, preferences, model, preview) }
                 composable("history") { History(library, preferences, open, repeat, reviewDay) }
                 composable("settings") { PreferencesPage(library, preferences, status, model, progression) { selectFolder.launch(null) } }
-                composable("progression") { ProgressionScreen(library, model, { nav.popBackStack() }, preview) }
+                composable("progression") { ProgressionScreen(library, model, { nav.popBackStack() }, preview) {
+                    nav.navigate("movements") { launchSingleTop = true }
+                } }
+                composable("movements") { MovementScreen(library, preferences.athlete, model) { nav.popBackStack() } }
                 composable("plan/{id}", listOf(navArgument("id") { type = NavType.StringType })) { route ->
                     if (library.loaded) {
                         val id = route.arguments?.getString("id")
@@ -180,6 +187,8 @@ private fun Home(
     progression: () -> Unit,
     openDays: (String) -> Unit,
     changePlannedDay: (Session, String, String, LocalDate?, () -> Unit) -> Unit,
+    prepareCycle: (Program, Profile, String?) -> Unit,
+    extendCycle: (Program, Profile) -> Unit,
     start: (String?) -> Unit,
 ) {
     if (!library.loaded || library.scope != preferences.folder) {
@@ -300,6 +309,7 @@ private fun Home(
             }
         }
 
+        CycleCards(library, preferences.athlete, prepareCycle, extendCycle)
         OutlinedButton(onClick = progression, modifier = Modifier.fillMaxWidth().testTag("open_progression")) {
             Text(stringResource(R.string.progression))
         }
@@ -367,5 +377,5 @@ private fun Home(
 @Preview(showBackground = true, widthDp = 390)
 @Composable
 private fun HomePreview() {
-    GymTheme(Theme.DARK) { Surface { Home(Library(loaded = true), Preferences(), SyncStatus(), {}, {}, {}, {}, {}, {}, { _, _, _, _, _ -> }, {}) } }
+    GymTheme(Theme.DARK) { Surface { Home(Library(loaded = true), Preferences(), SyncStatus(), {}, {}, {}, {}, {}, {}, { _, _, _, _, _ -> }, { _, _, _ -> }, { _, _ -> }, {}) } }
 }

@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package app.gymflow.domain
 
 import java.time.Instant
@@ -17,6 +19,12 @@ data class ParticipantWorkout(
     val exercises: List<ExerciseEntry> = emptyList(),
     val currentExerciseId: String? = null,
     val metrics: Metrics = Metrics(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val volume: WorkoutVolume = WorkoutVolume.NORMAL,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val originalPlan: List<ExercisePlan>? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val cycleSlot: CycleSlot? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val cycleCredited: Boolean = false,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val trainingBlocks: List<TrainingBlock> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val restUntil: String? = null,
 ) {
     val currentIndex: Int get() = exercises.indexOfFirst { it.id == currentExerciseId }.takeIf { it >= 0 }
         ?: exercises.indexOfFirst { it.athletes.single().next >= 0 }.coerceAtLeast(0)
@@ -31,9 +39,27 @@ data class ParticipantWorkout(
         templateId = template?.id,
         templateTitle = template?.title,
         templateNotes = template?.notes.orEmpty(),
-        exercises = template?.exercises.orEmpty().map(::entryFor),
+        exercises = template?.orderedExercises().orEmpty().map(::entryFor),
+        trainingBlocks = template?.blocks.orEmpty(),
+        cycleSlot = cycleSlot?.takeIf { it.templateId == template?.id },
+        cycleCredited = cycleCredited && cycleSlot?.templateId == template?.id,
+        restUntil = null,
         currentExerciseId = null,
-    )
+    ).let { row -> if (row.trainingBlocks.any { it.expandedOnly && it.enabled }) applyVolume(row, row.volume) else row }
+
+    fun withOriginalPlan() = if (originalPlan == null) copy(originalPlan = plans()) else this
+
+    fun discardExercise(id: String): ParticipantWorkout = withOriginalPlan().let { row ->
+        val entry = row.exercises.find { it.id == id } ?: return row
+        if ((listOf(entry) + entry.replaced).any { old -> old.athletes.single().sets.any { it.actual != null } }) {
+            row.editExercise(id) { item ->
+                val athlete = item.athletes.single()
+                item.copy(athletes = listOf(athlete.copy(sets = athlete.sets.map {
+                    if (it.status == SetStatus.PLANNED || it.deferred) it.copy(status = SetStatus.CANCELLED, deferred = false) else it
+                })))
+            }
+        } else row.copy(exercises = row.exercises - entry, currentExerciseId = row.currentExerciseId.takeUnless { it == id })
+    }
 
     fun addExercise(plan: ExercisePlan) = copy(exercises = exercises + entryFor(plan))
 
@@ -61,7 +87,7 @@ data class ParticipantWorkout(
         } else corrected
     }
 
-    fun replaceExercise(id: String, plan: ExercisePlan) = editExercise(id) { current ->
+    fun replaceExercise(id: String, plan: ExercisePlan) = withOriginalPlan().editExercise(id) { current ->
         entryFor(plan).copy(id = id, replaced = current.replaced + current.copy(replaced = emptyList()))
     }
 
@@ -70,7 +96,7 @@ data class ParticipantWorkout(
         if (index < 0) return this
         val to = (index + offset).coerceIn(exercises.indices)
         if (to == index) return this
-        return copy(currentExerciseId = id, exercises = exercises.toMutableList().apply { add(to, removeAt(index)) })
+        return withOriginalPlan().copy(currentExerciseId = id, exercises = exercises.toMutableList().apply { add(to, removeAt(index)) })
     }
 
     fun plans(): List<ExercisePlan> = exercises.map { e ->
@@ -98,6 +124,7 @@ data class TrainingSession(
     @OptIn(ExperimentalSerializationApi::class)
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val switchedProfileId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val scheduledFor: String? = null,
 ) : Document {
     constructor(title: String, date: String, participants: List<Profile>) : this(
         title = title, date = date, workouts = participants.map { ParticipantWorkout(profile = it) },
@@ -155,7 +182,11 @@ data class TrainingSession(
         status = SessionStatus.COMPLETED, finished = now.toString(), workouts = workouts.map {
             when (it.status) {
                 WorkoutStatus.PLANNED, WorkoutStatus.ACTIVE, WorkoutStatus.PAUSED -> it.copy(
-                    status = if (it.remaining == 0 && it.completed > 0) WorkoutStatus.COMPLETED else WorkoutStatus.CANCELLED,
+                    status = if (it.completed > 0 && (it.cycleSlot != null || it.exercises.none { entry ->
+                        entry.plan.block == PlanBlock.REQUIRED && !entry.athletes.single().skipped &&
+                            entry.athletes.single().sets.any { set -> set.status == SetStatus.PLANNED }
+                    })) WorkoutStatus.COMPLETED else WorkoutStatus.CANCELLED,
+                    restUntil = null,
                 )
                 else -> it
             }

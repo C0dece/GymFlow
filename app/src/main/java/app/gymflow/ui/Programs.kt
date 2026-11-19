@@ -27,6 +27,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
     var currentDay by rememberSaveable { mutableStateOf<String?>(null) }
     var editProgram by rememberSaveable { mutableStateOf(false) }
     var editDay by rememberSaveable { mutableStateOf(false) }
+    var blockId by rememberSaveable { mutableStateOf<String?>(null) }
     var editPlan by rememberSaveable { mutableStateOf<Int?>(null) }
     var individual by rememberSaveable { mutableStateOf<Int?>(null) }
     var moveId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -42,6 +43,11 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 Symbol(R.drawable.ic_add)
                 Spacer(Modifier.width(8.dp))
                 Text(stringResource(R.string.new_program))
+            }
+            if (library.programs.none { it.id == foundationProgramId }) {
+                OutlinedButton(onClick = model::addFoundationProgram, modifier = Modifier.testTag("add_foundation_program")) {
+                    Text("Добавить «Силовой фундамент 8»")
+                }
             }
             if (library.programs.isEmpty()) {
                 CardBlock {
@@ -75,6 +81,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
         } else {
             TextButton(onClick = ::back) { Symbol(R.drawable.ic_back); Spacer(Modifier.width(4.dp)); Text(stringResource(R.string.back)) }
             Text(day?.title ?: program.title, style = MaterialTheme.typography.headlineLarge)
+            if (program.caution.isNotBlank()) InlineStatus(program.caution, warning = true)
             if (day == null) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { editProgram = true }) { Text(stringResource(R.string.schedule_and_people)) }
@@ -105,11 +112,27 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                         Text(stringResource(R.string.add_exercise))
                     }
                 }
+                OutlinedButton(onClick = { blockId = "new" }, modifier = Modifier.testTag("add_training_block")) { Text("Добавить блок") }
+                day.blocks.forEachIndexed { index, block ->
+                    CardBlock {
+                        Text(block.name)
+                        Muted(block.requirement.label + if (block.enabled) "" else " · Отключён")
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { blockId = block.id }) { Text("Изменить блок") }
+                            if (index > 0) TextButton(onClick = {
+                                model.changeDay(program.id, day.id) { current ->
+                                    current.copy(blocks = current.blocks.toMutableList().apply { add(index - 1, removeAt(index)) })
+                                }
+                            }) { Text(stringResource(R.string.move_up)) }
+                        }
+                    }
+                }
                 day.exercises.forEachIndexed { index, plan ->
                     CardBlock {
                         Text(library.exercises.find { it.id == plan.exercise.id }?.name ?: plan.exercise.name,
                             style = MaterialTheme.typography.titleMedium)
-                        val sample = plan.sets.firstOrNull()
+                        day.blocks.find { it.id == plan.blockId }?.let { Muted(it.name) }
+                        val sample = plan.sets.firstOrNull { it.purpose == SetRole.WORK } ?: plan.sets.firstOrNull()
                         if (sample != null) {
                             Muted(stringResource(R.string.plan_details, plan.sets.size,
                                 if (sample.maxEffort) stringResource(R.string.max_effort) else if (sample.repsKnown) repRange(sample.repsMin, sample.repsMax) else "?",
@@ -152,10 +175,20 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
             editDay = false
         }
     }
+    if (blockId != null && day != null) {
+        BlockEditor(day.blocks.find { it.id == blockId }, { blockId = null }) { block ->
+            model.changeDay(program.id, day.id) { current ->
+                current.copy(blocks = if (current.blocks.any { it.id == block.id }) {
+                    current.blocks.map { if (it.id == block.id) block else it }
+                } else current.blocks + block)
+            }
+            blockId = null
+        }
+    }
     val editIndex = editPlan
     if (editIndex != null && day != null) {
         ExerciseEditor(if (editIndex < 0) stringResource(R.string.add_exercise) else stringResource(R.string.change_plan),
-            library, prefs, day.exercises.getOrNull(editIndex), { editPlan = null }) { plan, created ->
+            library, prefs, day.exercises.getOrNull(editIndex), { editPlan = null }, programOptions = true, trainingBlocks = day.blocks) { plan, created ->
             model.changeDay(program.id, day.id, created) { item ->
                 item.copy(exercises = if (editIndex < 0) item.exercises + plan else item.exercises.mapIndexed { i, existing ->
                     if (i == editIndex) plan else existing
@@ -211,23 +244,49 @@ private fun ProgramEditor(program: Program?, profiles: List<Profile>, close: () 
     var enabled by rememberSaveable { mutableStateOf(program?.enabled ?: true) }
     var anchor by rememberSaveable { mutableStateOf(program?.anchor ?: LocalDate.now().toString()) }
     var interval by rememberSaveable { mutableStateOf((program?.interval ?: 2).toString()) }
+    var legacy by rememberSaveable { mutableStateOf(program?.cycle == true && program.completionCycle == null) }
+    var visits by rememberSaveable { mutableStateOf((program?.completionCycle?.visitsPerWeek ?: 3).toString()) }
+    var target by rememberSaveable { mutableStateOf(program?.completionCycle?.targetSessions?.toString().orEmpty()) }
+    var preferred by remember { mutableStateOf(program?.completionCycle?.visitDays.orEmpty()) }
+    var caution by rememberSaveable { mutableStateOf(program?.caution.orEmpty()) }
+    val times = visits.toIntOrNull()?.takeIf { it in 1..7 }
+    val sessions = positiveInt(target)
     var people by remember { mutableStateOf(program?.participantIds.orEmpty()) }
-    val isValid = title.isNotBlank() && (fixed || (dateOrNull(anchor) != null && positiveInt(interval) != null))
+    val isValid = title.isNotBlank() && (fixed || dateOrNull(anchor) != null &&
+        (if (legacy) positiveInt(interval) != null else times != null &&
+            (preferred.isEmpty() || preferred.size == times) && (target.isBlank() || sessions != null)))
 
     EditorSheet(if (program == null) stringResource(R.string.new_program) else stringResource(R.string.schedule_and_people), close) {
         Field(title, stringResource(R.string.program_name), { title = it }, Modifier.fillMaxWidth().testTag("program_name"))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(fixed, { fixed = true }, label = { Text(stringResource(R.string.weekdays)) })
-            FilterChip(!fixed, { fixed = false }, label = { Text(stringResource(R.string.flex_cycle)) })
+            FilterChip(!fixed && !legacy, { fixed = false; legacy = false }, label = { Text("По циклу тренировок") },
+                modifier = Modifier.testTag("completion_schedule"))
+            if (program?.cycle == true && program.completionCycle == null) {
+                FilterChip(!fixed && legacy, { fixed = false; legacy = true }, label = { Text("Прежний интервал") })
+            }
         }
         if (!fixed) {
             Field(anchor, stringResource(R.string.cycle_start), { anchor = it })
-            Field(interval, stringResource(R.string.cycle_interval), { interval = it }, keyboard = KeyboardType.Number)
+            if (legacy) Field(interval, stringResource(R.string.cycle_interval), { interval = it }, keyboard = KeyboardType.Number)
+            else {
+                Field(visits, "Посещений в неделю", { visits = it }, Modifier.testTag("cycle_visits"), KeyboardType.Number)
+                Field(target, "Цель по завершённым занятиям (необязательно)", { target = it },
+                    Modifier.testTag("cycle_target"), KeyboardType.Number)
+                Muted("Предпочтительные дни. Если выбраны, их число должно совпасть с числом посещений.")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DayOfWeek.entries.forEach { day ->
+                        FilterChip(day in preferred, { preferred = if (day in preferred) preferred - day else preferred + day },
+                            label = { Text(weekday(day)) })
+                    }
+                }
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Switch(enabled, { enabled = it })
             Text(stringResource(R.string.schedule_on))
         }
+        Field(caution, "Ограничения программы", { caution = it }, singleLine = false)
         if (profiles.isNotEmpty()) {
             Text(stringResource(R.string.participants), style = MaterialTheme.typography.titleMedium)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -239,9 +298,11 @@ private fun ProgramEditor(program: Program?, profiles: List<Profile>, close: () 
         }
         Button(onClick = {
             val initial = program ?: Program(title = title.trim())
+            val completion = if (fixed || legacy) null else (initial.completionCycle ?: CompletionCycle()).copy(
+                visitsPerWeek = requireNotNull(times), visitDays = preferred, targetSessions = sessions)
             save(initial.copy(title = title.trim(), enabled = enabled, cycle = !fixed,
                 anchor = dateOrNull(anchor)?.toString() ?: LocalDate.now().toString(),
-                interval = positiveInt(interval) ?: 2, participantIds = people))
+                interval = positiveInt(interval) ?: 2, participantIds = people, completionCycle = completion, caution = caution.trim()))
         }, enabled = isValid, modifier = Modifier.fillMaxWidth().testTag("save_program")) { Text(stringResource(R.string.save)) }
     }
 }
@@ -286,7 +347,10 @@ private fun PersonalPlan(plan: ExercisePlan, profiles: List<Profile>, close: () 
         }
         Button(onClick = {
             if (amount != null && number != null && min != null && max != null) {
-                val sets = List(number) { SetPlan(amount, min, max, baseline.getOrNull(it)?.warmup == true) }
+                val sets = List(number) { index ->
+                    baseline.getOrNull(index)?.copy(weight = amount, weightKnown = true, repsMin = min, repsMax = max,
+                        repsKnown = true, maxEffort = false, targetReps = null) ?: SetPlan(amount, min, max)
+                }
                 save(plan.copy(individual = plan.individual + (id to sets)))
             }
         }, enabled = amount != null && number != null && min != null && max != null && min <= max, modifier = Modifier.fillMaxWidth()) {

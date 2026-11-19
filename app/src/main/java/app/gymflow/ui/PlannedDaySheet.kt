@@ -24,7 +24,8 @@ internal fun PlannedDaySheet(
     val selected = program.days.find { it.id == dayId }
     val busy = remember(source, member.profile.id, sessions) { otherPlannedDayIds(source, member.profile.id, sessions) }
     val swap = remember(program, selected, source.date, member.profile.id, sessions) {
-        selected?.let { nextPlannedDay(program, it, LocalDate.parse(source.date), member.profile.id, sessions) }
+        selected?.takeIf { program.completionCycle == null }
+            ?.let { nextPlannedDay(program, it, LocalDate.parse(source.date), member.profile.id, sessions) }
     }
     val options = remember(sessions, source, member.profile.id) { workoutDays(sessions, source, member.profile.id) }
 

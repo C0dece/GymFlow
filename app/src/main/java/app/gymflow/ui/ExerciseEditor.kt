@@ -24,6 +24,8 @@ fun ExerciseEditor(
     initial: ExercisePlan? = null,
     close: () -> Unit,
     options: @Composable () -> Unit = {},
+    programOptions: Boolean = false,
+    trainingBlocks: List<TrainingBlock> = emptyList(),
     save: (ExercisePlan, Exercise?) -> Unit,
 ) {
     val recent = remember(library.sessions) {
@@ -45,6 +47,18 @@ fun ExerciseEditor(
     var last by rememberSaveable { mutableStateOf(if (firstPlan?.repsKnown == false) "" else (firstPlan?.repsMax ?: prefs.maxReps).toString()) }
     var weight by rememberSaveable { mutableStateOf(if (firstPlan?.weightKnown == false) "" else number(firstPlan?.weight ?: prefs.initialWeight)) }
     var warmup by rememberSaveable { mutableStateOf(firstPlan?.warmup ?: false) }
+    var block by rememberSaveable { mutableStateOf(initial?.block ?: PlanBlock.REQUIRED) }
+    var selection by rememberSaveable { mutableStateOf(initial?.selection ?: MovementSelection.FIXED) }
+    var skillId by rememberSaveable { mutableStateOf(initial?.skillId) }
+    var blockId by rememberSaveable { mutableStateOf(initial?.blockId) }
+    var cardio by rememberSaveable { mutableStateOf<CardioType?>(initial?.exercise?.cardio) }
+    var rest by rememberSaveable { mutableStateOf(initial?.restSeconds?.toString().orEmpty()) }
+    var autoRest by rememberSaveable { mutableStateOf(initial?.autoRest ?: false) }
+    var caution by rememberSaveable { mutableStateOf(initial?.caution.orEmpty()) }
+    var warmupTemplate by rememberSaveable { mutableStateOf(false) }
+    var warmCount by rememberSaveable { mutableStateOf("") }
+    var rampCount by rememberSaveable { mutableStateOf("") }
+    var warmReps by rememberSaveable { mutableStateOf("") }
     val selected = library.exercises.find { it.id == picked }
         ?: initial?.exercise?.takeIf { it.id == picked }
         ?: library.exercises.find { !it.archived && it.name.trim().equals(name.trim(), ignoreCase = true) }
@@ -62,7 +76,13 @@ fun ExerciseEditor(
     val amount = decimal(weight)
     val numericRange = min != null && max != null && min <= max
     val unspecifiedRange = first.isBlank() && last.isBlank()
-    val ready = name.isNotBlank() && sets != null && (numericRange || unspecifiedRange) && (amount != null || weight.isBlank())
+    val restValue = positiveInt(rest)?.takeIf { it <= 86400 }
+    val warm = positiveInt(warmCount)?.takeIf { it <= 30 }
+    val ramp = positiveInt(rampCount)?.takeIf { it <= 30 }
+    val warmRepCount = positiveInt(warmReps)
+    val ready = name.isNotBlank() && sets != null && (numericRange || unspecifiedRange) && (amount != null || weight.isBlank()) &&
+        (rest.isBlank() || restValue != null) && (!warmupTemplate || (warmCount.isBlank() || warm != null) &&
+            (rampCount.isBlank() || ramp != null) && (warmReps.isBlank() || warmRepCount != null))
     EditorSheet(title, close) {
         Field(name, stringResource(R.string.exercise_name), { name = it; picked = null }, Modifier.fillMaxWidth().testTag("exercise_name"))
         if (initial == null && name.isBlank() && library.exercises.isNotEmpty()) {
@@ -79,13 +99,19 @@ fun ExerciseEditor(
                     name = choice.name
                     load = choice.load
                     unit = choice.unit
-                    first = choice.repsMin.toString()
-                    last = choice.repsMax.toString()
+                    val timed = choice.tracksDuration
+                    first = if (timed) "" else choice.repsMin.toString()
+                    last = if (timed) "" else choice.repsMax.toString()
+                    if (timed) weight = ""
                 }, label = { Text(choice.name) })
             }
         }
         if (showOptions) {
             if (selected == null) {
+                Choice(cardio, listOf(null) + CardioType.entries, { it?.label ?: "Силовое или другое упражнение" }, {
+                    cardio = it
+                    if (it != null) { load = Load.OTHER; first = ""; last = ""; weight = "" }
+                }, "exercise_cardio")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Load.entries.forEach { option ->
                         FilterChip(load == option, { load = option }, label = { Text(loadText(option)) })
@@ -110,6 +136,29 @@ fun ExerciseEditor(
         OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.testTag("exercise_options")) {
             Text(stringResource(if (showOptions) R.string.hide_options else R.string.exercise_options))
         }
+        if (programOptions && showOptions) {
+            if (trainingBlocks.isNotEmpty()) Choice(trainingBlocks.find { it.id == blockId }, listOf(null) + trainingBlocks,
+                { it?.name ?: "Без блока" }, { blockId = it?.id }, "training_block")
+            if (blockId == null) Choice(block, PlanBlock.entries, { it.label }, { block = it }, "plan_block")
+            Field(rest, "Отдых, с", { rest = it }, Modifier.testTag("planned_rest"), KeyboardType.Number)
+            if (restValue != null) FilterChip(autoRest, { autoRest = !autoRest }, label = { Text("Запускать таймер после подхода") })
+            Field(caution, "Ограничения упражнения", { caution = it }, singleLine = false)
+            TextButton(onClick = { warmupTemplate = !warmupTemplate }) { Text("Шаблон разминочных подходов") }
+            if (warmupTemplate) {
+                Field(warmCount, "Разминочных подходов", { warmCount = it }, keyboard = KeyboardType.Number)
+                Field(rampCount, "Подводящих подходов", { rampCount = it }, keyboard = KeyboardType.Number)
+                Field(warmReps, "Повторов в этих подходах (необязательно)", { warmReps = it }, keyboard = KeyboardType.Number)
+                Muted("Вес этих подходов указывается вручную.")
+            }
+            if (selected?.movement?.familyId != null) {
+                Choice(selection, MovementSelection.entries, { it.label }, { selection = it }, "movement_selection")
+            }
+            if (library.skills.isNotEmpty()) {
+                val skills = listOf(null) + library.skills
+                Choice(skills.find { it?.id == skillId }, skills, { it?.name ?: "Без блока навыка" },
+                    { skillId = it?.id }, "plan_skill")
+            }
+        }
         options()
         Button(enabled = ready, onClick = {
             if (sets != null && ready) {
@@ -117,11 +166,23 @@ fun ExerciseEditor(
                 val high = max ?: firstPlan?.repsMax ?: prefs.maxReps
                 val setPlan = SetPlan(amount ?: 0.0, low, high, warmup, weightKnown = amount != null,
                     maxEffort = unspecifiedRange && firstPlan?.maxEffort == true, repsKnown = numericRange,
-                    targetReps = firstPlan?.targetReps?.takeIf { numericRange && it in low..high })
-                val exercise = selected ?: Exercise(name = name.trim(), unit = unit, load = load, repsMin = low, repsMax = high)
+                    targetReps = firstPlan?.targetReps?.takeIf { numericRange && it in low..high },
+                    role = firstPlan?.role?.takeUnless { it == SetRole.WARMUP && !warmup })
+                val exercise = selected ?: Exercise(name = name.trim(), unit = unit, load = load, repsMin = low, repsMax = high, cardio = cardio)
                 val same = initial != null && sets == initial.sets.size && firstPlan == setPlan
-                val plans = if (same) initial.sets else List(sets) { setPlan.copy(warmup = warmup && it == 0) }
-                save(ExercisePlan(exercise, plans, initial?.individual.orEmpty()), exercise.takeIf { selected == null })
+                val plans = if (same) initial.sets else List(sets) { index ->
+                    setPlan.copy(warmup = warmup && index == 0, role = setPlan.role?.takeUnless { it == SetRole.WARMUP && index > 0 })
+                }
+                val planned = if (warmupTemplate && (warm != null || ramp != null)) {
+                    val reps = warmRepCount ?: 1
+                    val prepare = SetPlan(repsMin = reps, repsMax = reps, weightKnown = false, repsKnown = warmRepCount != null)
+                    List(warm ?: 0) { prepare.copy(role = SetRole.WARMUP, warmup = true) } +
+                        List(ramp ?: 0) { prepare.copy(role = SetRole.RAMP) } +
+                        plans.filter { it.purpose !in setOf(SetRole.WARMUP, SetRole.RAMP) }
+                } else plans
+                save(ExercisePlan(exercise, planned, initial?.individual.orEmpty(), block,
+                    selection.takeIf { exercise.movement?.familyId != null } ?: MovementSelection.FIXED, skillId,
+                    blockId, restValue, autoRest && restValue != null, caution.trim()), exercise.takeIf { selected == null })
             }
         }, modifier = Modifier.fillMaxWidth().testTag("save_exercise")) {
             Text(if (initial == null) stringResource(R.string.add) else stringResource(R.string.save))

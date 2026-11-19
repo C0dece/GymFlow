@@ -32,23 +32,27 @@ fun ExerciseCard(
     val previous = remember(library.sessions, exercise.id, profile.id) {
         library.sessions.asSequence().filter { it.id != session.id }.firstNotNullOfOrNull { old ->
             old.completedWorkouts(profile.id).flatMap { it.exercises }.firstNotNullOfOrNull { item ->
-                if (item.exercise.id != exercise.id || item.exercise.unit != exercise.unit || item.exercise.load != exercise.load) null
+                if (!item.exercise.comparableWith(exercise) || item.exercise.unit != exercise.unit) null
                 else item.athletes.find { it.participantId == profile.id && !it.skipped }?.sets
-                    ?.lastOrNull { it.status == SetStatus.COMPLETED && !it.plan.warmup }?.actual
+                    ?.lastOrNull { it.status == SetStatus.COMPLETED && it.plan.purpose == SetRole.WORK && it.actual?.technique != Technique.CHANGED }?.actual
             }
         }
     }
-    ScreenColumn {
+    ScreenColumn(Modifier.testTag("exercise_card_${entry.id}")) {
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(exercise.name, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("exercise_title"))
-                Muted("${loadText(exercise.load)} · ${unitText(exercise.unit)}")
+                Muted(exercise.cardio?.label ?: "${loadText(exercise.load)} · ${unitText(exercise.unit)}")
             }
             if (editable) actions()
         }
-        if (previous != null && previous.weightKnown && previous.repsKnown) {
+        if (entry.plan.caution.isNotBlank()) InlineStatus(entry.plan.caution, warning = true)
+        library.movementTracks.find { it.profileId == profile.id && it.exerciseId == exercise.id }
+            ?.limitations?.takeIf { it.isNotBlank() }?.let { InlineStatus(it, warning = true) }
+        if (previous != null && (previous.weightKnown && previous.repsKnown || previous.measurements.isNotEmpty())) {
             Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(10.dp)) {
-                Text(stringResource(R.string.previous_result, number(previous.weight), unitText(exercise.unit), previous.reps),
+                Text(if (previous.measurements.isEmpty()) stringResource(R.string.previous_result, number(previous.weight), unitText(exercise.unit), previous.reps)
+                    else "Ранее · " + actualText(previous, exercise),
                     Modifier.padding(horizontal = 12.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
             }
         }
@@ -61,8 +65,8 @@ fun ExerciseCard(
             }
             var work = 0
             athlete.sets.forEachIndexed { index, set ->
-                if (!set.plan.warmup) work++
-                val label = if (set.plan.warmup) stringResource(R.string.warmup) else stringResource(R.string.set_number, work)
+                if (set.plan.purpose == SetRole.WORK) work++
+                val label = if (set.plan.purpose == SetRole.WORK) stringResource(R.string.set_number, work) else set.plan.purpose.label
                 SetRow(set, label, exercise, isActive, set.id == focusSet && set.status == SetStatus.PLANNED,
                     index, profile.compact, { edit(set) }, { toggle(set) }, correcting)
             }
@@ -117,36 +121,81 @@ private fun SetRow(set: SetEntry, label: String, exercise: Exercise, enabled: Bo
 
 @Composable
 fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -> Unit, newResult: Boolean = false, save: (SetEntry) -> Unit) {
-    var weight by rememberSaveable { mutableStateOf(if (set.proposed.weightKnown) number(set.proposed.weight) else "") }
-    var reps by rememberSaveable { mutableStateOf(if (set.proposed.repsKnown) set.proposed.reps.toString() else "") }
+    val initializingTimed = set.actual == null && exercise.tracksDuration
+    var weight by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.weightKnown) number(set.proposed.weight) else "") }
+    var reps by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.repsKnown) set.proposed.reps.toString() else "") }
     var note by rememberSaveable { mutableStateOf(set.proposed.note) }
     val amount = decimal(weight)
     val repCount = positiveInt(reps)
+    var purpose by rememberSaveable { mutableStateOf(set.plan.purpose) }
+    var advanced by rememberSaveable { mutableStateOf(false) }
+    var minReps by rememberSaveable { mutableStateOf(set.plan.repsMin.toString().takeIf { set.plan.repsKnown }.orEmpty()) }
+    var maxReps by rememberSaveable { mutableStateOf(set.plan.repsMax.toString().takeIf { set.plan.repsKnown }.orEmpty()) }
+    var technique by rememberSaveable { mutableStateOf(set.actual?.technique) }
+    val kinds = (exercise.movement?.measures.orEmpty() + set.proposed.measurements.keys +
+        if (exercise.cardio != null) cardioMeasures else emptySet()).sortedBy { it.ordinal }
+    val observed = remember(set.id) { mutableStateMapOf<Measure, String>().apply {
+        set.proposed.measurements.forEach { (kind, value) -> put(kind, number(value)) }
+    } }
+    val measurements = observed.filterValues { it.isNotBlank() }.mapValues { it.value.trim().replace(',', '.').toDoubleOrNull() }
+    val measured = measurements.mapNotNull { (kind, value) -> value?.takeIf(kind::accepts)?.let { kind to it } }.toMap()
+    val valid = measurements.size == measured.size && (weight.isBlank() || amount != null) &&
+        (reps.isBlank() || repCount != null) && (measured.isNotEmpty() || exercise.cardio == null && amount != null && repCount != null)
+    val plan = set.plan.copy(role = purpose.takeUnless { it == set.plan.purpose } ?: set.plan.role,
+        warmup = purpose == SetRole.WARMUP)
     EditorSheet(stringResource(R.string.edit_set), close) {
-        Muted(loadText(exercise.load))
-        StepField(weight, stringResource(R.string.weight_unit, unitText(exercise.unit)), { weight = it }, "set_weight", KeyboardType.Decimal) { step ->
+        Muted(exercise.cardio?.label ?: loadText(exercise.load))
+        if (exercise.cardio == null) StepField(weight, stringResource(R.string.weight_unit, unitText(exercise.unit)), { weight = it }, "set_weight", KeyboardType.Decimal) { step ->
             val delta = prefs.step * if (prefs.unit == exercise.unit) 1.0 else prefs.unit.toKg / exercise.unit.toKg
             val value = ((amount ?: 0.0) + delta * step).coerceAtLeast(0.0)
             if (value.isFinite()) weight = number(value.toBigDecimal().setScale(3, java.math.RoundingMode.HALF_UP).toDouble())
         }
-        StepField(reps, stringResource(R.string.reps), { reps = it }, "set_reps", KeyboardType.Number) { step ->
+        if (exercise.cardio == null) StepField(reps, stringResource(R.string.reps), { reps = it }, "set_reps", KeyboardType.Number) { step ->
             reps = ((repCount ?: 1).toLong() + step).coerceIn(1, Int.MAX_VALUE.toLong()).toString()
         }
+        kinds.forEach { kind ->
+            Field(observed[kind].orEmpty(), kind.label, { observed[kind] = it },
+                Modifier.testTag("measure_${kind.name}"), keyboard = KeyboardType.Decimal)
+        }
         Field(note, stringResource(R.string.note), { note = it }, singleLine = false)
+        TextButton(onClick = { advanced = !advanced }) { Text("Параметры подхода") }
+        if (advanced) {
+            Choice(purpose, SetRole.entries, { it.label }, { purpose = it }, "set_role")
+            Choice(technique, listOf(null) + Technique.entries, { it?.label ?: "Без отметки техники" },
+                { technique = it }, "set_technique")
+            if (!newResult && set.status == SetStatus.PLANNED) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Field(minReps, "План от", { minReps = it }, Modifier.weight(1f), KeyboardType.Number)
+                    Field(maxReps, "План до", { maxReps = it }, Modifier.weight(1f), KeyboardType.Number)
+                }
+                val low = positiveInt(minReps)
+                val high = positiveInt(maxReps)
+                val range = low != null && high != null && low <= high
+                OutlinedButton(onClick = {
+                    save(set.copy(plan = plan.copy(weight = amount ?: 0.0, weightKnown = amount != null,
+                        repsMin = low ?: set.plan.repsMin, repsMax = high ?: set.plan.repsMax,
+                        repsKnown = range, maxEffort = false, targetReps = null), deferred = false))
+                }, enabled = (weight.isBlank() || amount != null) && (range || minReps.isBlank() && maxReps.isBlank())) {
+                    Text("Сохранить план подхода")
+                }
+            }
+        }
         Button(onClick = {
-            if (amount != null && repCount != null) save(set.copy(actual = Actual(amount, repCount, note.trim()), status = SetStatus.COMPLETED))
-        }, enabled = amount != null && repCount != null, modifier = Modifier.fillMaxWidth().testTag("save_set")) {
+            if (valid) save(set.copy(plan = plan, actual = Actual(amount ?: 0.0, repCount ?: 1, note.trim(),
+                weightKnown = amount != null, repsKnown = repCount != null, measurements = measured, technique = technique),
+                status = SetStatus.COMPLETED, deferred = false))
+        }, enabled = valid, modifier = Modifier.fillMaxWidth().testTag("save_set")) {
             Text(stringResource(R.string.record_result))
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!newResult) {
-                TextButton(onClick = { save(set.copy(status = SetStatus.SKIPPED)) }) { Text(stringResource(R.string.skip)) }
-                TextButton(onClick = { save(set.copy(status = SetStatus.CANCELLED)) },
+                TextButton(onClick = { save(set.copy(status = SetStatus.SKIPPED, deferred = false)) }) { Text(stringResource(R.string.skip)) }
+                TextButton(onClick = { save(set.copy(status = SetStatus.CANCELLED, deferred = false)) },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
                     Text(stringResource(R.string.remove_set))
                 }
                 if (set.status == SetStatus.SKIPPED || set.status == SetStatus.CANCELLED) {
-                    TextButton(onClick = { save(set.copy(status = SetStatus.PLANNED)) }) { Text(stringResource(R.string.return_to_plan)) }
+                    TextButton(onClick = { save(set.copy(status = SetStatus.PLANNED, deferred = false)) }) { Text(stringResource(R.string.return_to_plan)) }
                 }
             }
             TextButton(onClick = close) { Text(stringResource(R.string.cancel)) }

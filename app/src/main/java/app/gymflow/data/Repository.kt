@@ -36,6 +36,10 @@ data class Library(
     val profiles = documents.filterIsInstance<Profile>().sortedBy { it.name }
     val exercises = documents.filterIsInstance<Exercise>().sortedBy { it.name }
     val availableProfiles = profiles.filterNot { it.archived }
+    val families = documents.filterIsInstance<MovementFamily>().sortedBy { it.name }
+    val movementTracks = documents.filterIsInstance<MovementTrack>()
+    val skills = documents.filterIsInstance<MovementSkill>().sortedBy { it.name }
+    val attempts = documents.filterIsInstance<SkillAttempt>().sortedByDescending { it.date }
     val policies = documents.filterIsInstance<ProgressionPolicy>()
     val reviews = documents.filterIsInstance<ProgressionReview>().sortedByDescending { it.date }
 
@@ -90,13 +94,14 @@ class Repository(private val context: Context, private val journal: Journal, val
         null
     }
     private fun folder(scope: String) = SafFolder(context, scope.toUri())
-    private val locations = listOf("Тренировки", "Программы", "Упражнения", "Участники", "Прогрессия")
+    private val locations = listOf("Тренировки", "Программы", "Упражнения", "Участники", "Прогрессия", "Движения")
     private fun location(doc: Document) = when (doc) {
         is Session -> locations[0]
         is Program -> locations[1]
         is Exercise -> locations[2]
         is Profile -> locations[3]
         is ProgressionPolicy, is ProgressionReview -> locations[4]
+        is MovementFamily, is MovementTrack, is MovementSkill, is SkillAttempt -> locations[5]
     }
 
     private suspend fun <T> exclusive(action: suspend () -> T): T = withContext(Dispatchers.IO) {
@@ -172,8 +177,9 @@ class Repository(private val context: Context, private val journal: Journal, val
             check(!session.status.let { it == SessionStatus.COMPLETED || it == SessionStatus.SKIPPED }) {
                 "Тренировка закрыта"
             }
-            val after = edit(session)
-            require(after.id == session.id)
+            val edited = edit(session)
+            require(edited.id == session.id)
+            val after = edited.copy(workouts = edited.workouts.map(ParticipantWorkout::creditCycle))
             val groupClosed = after.status == SessionStatus.COMPLETED && session.status != SessionStatus.COMPLETED
             val people = after.workouts.filter { workout ->
                 (groupClosed || workout.status == WorkoutStatus.COMPLETED) &&
@@ -190,7 +196,7 @@ class Repository(private val context: Context, private val journal: Journal, val
             val session = records.get(scope, sessionId)?.let(::decoded) as? Session ?: error("Тренировка не найдена")
             val workout = session.allWorkouts.firstOrNull { it.id == workoutId } ?: error("Тренировка не найдена")
             check(workout in session.completedWorkouts(workout.profile.id)) { "Тренировка ещё не завершена" }
-            val after = session.editWorkoutById(workoutId) { row -> row.recordCorrection(exerciseId, original, result) }
+            val after = session.editWorkoutById(workoutId) { row -> row.recordCorrection(exerciseId, original, result).creditCycle() }
             (listOf(after) + progressionReviews(scope, after, setOf(workout.profile.id))).forEach { stage(scope, it) }
         }
     }
@@ -232,6 +238,26 @@ class Repository(private val context: Context, private val journal: Journal, val
                 val selected = if (program.participantIds.isEmpty()) listOf(self) else
                     program.participantIds.mapNotNull { id -> library.availableProfiles.find { it.id == id } }
                 if (selected.isEmpty()) return@forEach
+                val cycle = program.completionCycle
+                if (cycle != null) {
+                    if (program.enabled && today.toString() >= program.anchor && cycle.visitsOn(today)) {
+                        selected.forEach { profile ->
+                            val position = cyclePosition(program, profile.id, library.sessions)
+                            val day = position.next
+                            val workedToday = library.sessions.any { session ->
+                                session.date == today.toString() && session.allWorkouts.any {
+                                    it.profile.id == profile.id && it.cycleSlot?.programId == program.id &&
+                                        it.status == WorkoutStatus.COMPLETED && (it.cycleCredited || it.hasCycleResult())
+                                }
+                            }
+                            if (day != null && position.pending == null && !workedToday) {
+                                val next = cycleAppointment(program, profile, day, today, position, advance = true)
+                                if (sessionIds.add(next.id)) additions.add(next)
+                            }
+                        }
+                    }
+                    return@forEach
+                }
                 plannedOn(program, today).filter { it.exercises.isNotEmpty() }.forEach { day ->
                     val duplicate = library.sessions.any {
                         it.programId == program.id && it.programDayId == day.id && it.date == today.toString()
@@ -253,7 +279,9 @@ class Repository(private val context: Context, private val journal: Journal, val
                     }
                 }
             }
-            if (additions.isNotEmpty() && fallback == null) additions.add(self)
+            val needsCycleProfile = library.programs.any { it.enabled && it.completionCycle != null &&
+                it.participantIds.isEmpty() && it.days.any { day -> day.orderedExercises().isNotEmpty() } }
+            if (fallback == null && (additions.isNotEmpty() || needsCycleProfile)) additions.add(self)
             additions
         }
     }
