@@ -182,4 +182,10 @@
     <string name="workout_actions">Действия тренировки</string>
     <string name="workout_details">Самочувствие и заметки</string>
     <string name="workout_summary">Упражнений: %1$d · Подходов: %2$d</string>
+    <string name="edit_program">Настройки программы</string>
+    <string name="program_description">Описание программы</string>
+    <string name="day_notes">Разминка, заминка и примечания</string>
+    <string name="duplicate">Копия</string>
+    <string name="delete_day_confirm_title">Удалить тренировочный день?</string>
+    <string name="delete_day_confirm_text">День «%1$s» будет удалён из программы вместе со всеми упражнениями.</string>
 </resources>
