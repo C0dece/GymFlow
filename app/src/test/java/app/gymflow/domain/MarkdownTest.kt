@@ -19,7 +19,7 @@ class MarkdownTest {
         assertTrue(golden.contains("| 1 | 16 × 8-12 | 18 × 10 | Выполнен |  |"))
         val upgraded = Markdown.write(workout, decoded.freeText)
         assertEquals(decoded, Markdown.read(upgraded))
-        assertTrue(upgraded.contains("gymflow_schema: 5"))
+        assertTrue(upgraded.contains("gymflow_schema: 6"))
     }
 
     @Test fun oneTwoThreeAndManyParticipants() {
@@ -70,7 +70,7 @@ class MarkdownTest {
         val v1 = requireNotNull(Markdown.read(golden))
         assertEquals(v1.document, v0.document)
         val saved = Markdown.write(v0.document)
-        assertTrue(saved.startsWith("---\ngymflow_schema: 5"))
+        assertTrue(saved.startsWith("---\ngymflow_schema: 6"))
         assertEquals(v0.document, Markdown.read(saved)?.document)
     }
 

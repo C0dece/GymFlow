@@ -17,7 +17,7 @@ interface DocumentCodec {
 data class MarkdownDocument(val document: Document, val freeText: String, val extraYaml: Map<String, String> = emptyMap())
 
 object Markdown : DocumentCodec {
-    const val schema = 5
+    const val schema = 6
     private const val open = "<!-- gymflow:json"
     private const val close = "gymflow:json -->"
     private const val reportStart = "<!-- gymflow:report -->"
@@ -171,6 +171,7 @@ object Markdown : DocumentCodec {
                 LocalDate.parse(document.anchor)
                 require(document.interval > 0 && document.days.distinctBy { it.id }.size == document.days.size)
                 require(document.completionCycle == null || document.cycle)
+                require(document.durationWeeks == null || document.durationWeeks > 0)
                 document.days.forEach { day ->
                     val blocks = day.blocks.map { it.id }.toSet()
                     require(blocks.size == day.blocks.size)
@@ -280,7 +281,7 @@ object Markdown : DocumentCodec {
                     appendLine("- ${md(block.name)}: ${block.requirement.label}. ${md(block.guidance)}")
                 }
                 day.exercises.forEach { plan ->
-                    val details = plan.restSeconds?.let { ". Отдых $it с" }.orEmpty()
+                    val details = plan.restLabel()?.let { ". Отдых $it" }.orEmpty()
                     appendLine("- ${md(plan.exercise.name)}: ${plan.sets.joinToString(transform = ::planText)}$details")
                 }
             }
@@ -356,5 +357,17 @@ object Markdown : DocumentCodec {
         WorkoutStatus.COMPLETED -> "Завершена"
         WorkoutStatus.SKIPPED -> "Пропущена"
         WorkoutStatus.CANCELLED -> "Отменена"
+    }
+}
+
+internal fun digest(value: String): String {
+    val bytes = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+    val hex = "0123456789abcdef"
+    return buildString(bytes.size * 2) {
+        bytes.forEach { byte ->
+            val n = byte.toInt() and 0xff
+            append(hex[n ushr 4])
+            append(hex[n and 0xf])
+        }
     }
 }

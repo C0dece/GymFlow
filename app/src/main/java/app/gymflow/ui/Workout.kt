@@ -21,7 +21,7 @@ import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 import kotlinx.coroutines.launch
 
-private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE }
+private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE }
 
 @Composable
 fun Workout(
@@ -205,6 +205,9 @@ private fun ColumnScope.ParticipantScreen(
                         }
                     }
                     Action(stringResource(R.string.workout_details)) { open(Sheet.METRICS) }
+                    if (chosen.templateNotes.isNotBlank() || chosen.trainingBlocks.any { it.enabled && it.guidance.isNotBlank() }) {
+                        Action("Указания к тренировке") { open(Sheet.GUIDANCE) }
+                    }
                     if (editable) Action("Объём тренировки", "training_volume") { open(Sheet.VOLUME) }
                     if (canCorrect) Action(stringResource(R.string.correct_results), "correct_results") { menu = false; correcting = true }
                     if (editable) {
@@ -423,6 +426,14 @@ private fun ColumnScope.ParticipantScreen(
             if (set != null) SetEditor(set, entry.exercise, prefs, close, newResult = extraSet != null) { result ->
                 if (canCorrect && correcting) model.correctResult(session.id, chosen.id, entry.id, original, result, onSaved = close)
                 else record(entry.id, result, rotate = true)
+            }
+        }
+        Sheet.GUIDANCE -> EditorSheet("Указания к тренировке", close) {
+            if (chosen.templateNotes.isNotBlank()) Text(chosen.templateNotes)
+            chosen.trainingBlocks.filter { it.enabled && it.guidance.isNotBlank() }.forEach { block ->
+                SectionTitle(block.name)
+                Muted(block.requirement.label)
+                Text(block.guidance)
             }
         }
         Sheet.METRICS -> if (active) {

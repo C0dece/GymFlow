@@ -115,16 +115,9 @@ class CompletionCycleTest {
         assertEquals(0L, restRemaining(now.toString(), now.plusSeconds(1)))
     }
 
-    @Test fun foundationTemplateUsesUnknownWeightsAndOldSchemaKeepsItsSchedule() {
-        val (foundation, exercises) = foundationProgram(emptyList(), monday)
-        assertEquals(4, foundation.days.size)
-        assertEquals(24, foundation.completionCycle?.targetSessions)
-        assertEquals(exercises.map { it.id }.distinct().size, exercises.size)
-        assertTrue(foundation.days.flatMap { it.exercises }.flatMap { it.sets }.none { it.weightKnown })
-        assertTrue(foundation.days.all { day -> day.blocks.any { it.type == BlockType.CARDIO && it.requirement == PlanBlock.OPTIONAL } })
-        assertEquals(foundation, Markdown.read(Markdown.write(foundation))?.document)
+    @Test fun oldSchemaKeepsItsSchedule() {
         val legacy = program.copy(completionCycle = null)
-        val fromV4 = Markdown.read(Markdown.write(legacy).replace("gymflow_schema: 5", "gymflow_schema: 4"))!!.document as Program
+        val fromV4 = Markdown.read(Markdown.write(legacy).replace("gymflow_schema: 6", "gymflow_schema: 4"))!!.document as Program
         assertEquals(legacy, fromV4)
         assertEquals(listOf(days[1]), plannedOn(fromV4, monday.plusDays(2)))
     }

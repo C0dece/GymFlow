@@ -3,6 +3,9 @@
 package app.gymflow.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.net.toUri
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,6 +26,16 @@ import java.time.LocalDate
 
 @Composable
 fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (String?) -> Unit) {
+    var input by remember { mutableStateOf<ProgramInput?>(null) }
+    var importTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var showSource by remember { mutableStateOf(false) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.readProgramFile(uri, importTarget) { input = it }
+    }
+    fun chooseFile(target: String?) {
+        importTarget = target
+        filePicker.launch(arrayOf("*/*"))
+    }
     var currentId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentDay by rememberSaveable { mutableStateOf<String?>(null) }
     var editProgram by rememberSaveable { mutableStateOf(false) }
@@ -44,10 +57,8 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 Spacer(Modifier.width(8.dp))
                 Text(stringResource(R.string.new_program))
             }
-            if (library.programs.none { it.id == foundationProgramId }) {
-                OutlinedButton(onClick = model::addFoundationProgram, modifier = Modifier.testTag("add_foundation_program")) {
-                    Text("Добавить «Силовой фундамент 8»")
-                }
+            OutlinedButton(onClick = { chooseFile(null) }, modifier = Modifier.testTag("import_program_file")) {
+                Text("Импортировать Markdown")
             }
             if (library.programs.isEmpty()) {
                 CardBlock {
@@ -83,6 +94,14 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
             Text(day?.title ?: program.title, style = MaterialTheme.typography.headlineLarge)
             if (program.caution.isNotBlank()) InlineStatus(program.caution, warning = true)
             if (day == null) {
+                program.importSource?.let { source ->
+                    Muted(source.name + source.revision.takeIf { it.isNotBlank() }?.let { " · Версия $it" }.orEmpty())
+                    OutlinedButton(onClick = { model.readProgramFile(source.uri.toUri(), program.id) { input = it } }) { Text("Проверить источник") }
+                    TextButton(onClick = { chooseFile(program.id) }) { Text("Выбрать файл источника") }
+                }
+                if (program.description.isNotBlank() || !program.importSource?.original.isNullOrBlank()) {
+                    TextButton(onClick = { showSource = true }) { Text("Указания и исходный текст") }
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { editProgram = true }) { Text(stringResource(R.string.schedule_and_people)) }
                     Button(onClick = { editDay = true }) { Text(stringResource(R.string.add_day)) }
@@ -158,6 +177,18 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
         }
     }
 
+    input?.let { selected ->
+        ProgramImportSheet(selected, library, { input = null }) { review ->
+            model.saveImportedProgram(review, library.scope) { id ->
+                input = null
+                currentId = id
+                currentDay = null
+            }
+        }
+    }
+    if (showSource && program != null) EditorSheet("Указания и исходный текст", { showSource = false }) {
+        Text(program.importSource?.original?.takeIf { it.isNotBlank() } ?: program.description)
+    }
     if (editProgram) {
         ProgramEditor(program, library.profiles, { editProgram = false }) {
             currentId = it.id

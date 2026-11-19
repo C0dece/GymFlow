@@ -13,7 +13,6 @@ import androidx.room.Query
 import androidx.room.RoomDatabase
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "documents", primaryKeys = ["scope", "id"])
@@ -87,7 +86,16 @@ class SafFolder(context: Context, private val tree: Uri) {
         return Docs.getDocumentId(document)
     }
 
-    fun read(id: String): String = resolver.openInputStream(uri(id))?.use { stream ->
+    fun read(id: String): String = readMarkdownFile(resolver, uri(id))
+
+    fun write(id: String, markdown: String) {
+        resolver.openOutputStream(uri(id), "wt")?.use { it.write(markdown.toByteArray(Charsets.UTF_8)) }
+            ?: throw IOException("Не удалось открыть файл на запись")
+    }
+}
+
+internal fun readMarkdownFile(resolver: ContentResolver, uri: Uri): String =
+    resolver.openInputStream(uri)?.use { stream ->
         val bytes = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
         while (true) {
@@ -101,21 +109,3 @@ class SafFolder(context: Context, private val tree: Uri) {
         if (!value.toByteArray(Charsets.UTF_8).contentEquals(raw)) throw IOException("Ожидался UTF-8")
         value
     } ?: throw IOException("Не удалось прочитать файл")
-
-    fun write(id: String, markdown: String) {
-        resolver.openOutputStream(uri(id), "wt")?.use { it.write(markdown.toByteArray(Charsets.UTF_8)) }
-            ?: throw IOException("Не удалось открыть файл на запись")
-    }
-}
-
-fun digest(value: String): String {
-    val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
-    val hex = "0123456789abcdef"
-    return buildString(bytes.size * 2) {
-        bytes.forEach { byte ->
-            val n = byte.toInt() and 0xff
-            append(hex[n ushr 4])
-            append(hex[n and 0xf])
-        }
-    }
-}

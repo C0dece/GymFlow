@@ -53,6 +53,7 @@ fun ExerciseEditor(
     var blockId by rememberSaveable { mutableStateOf(initial?.blockId) }
     var cardio by rememberSaveable { mutableStateOf<CardioType?>(initial?.exercise?.cardio) }
     var rest by rememberSaveable { mutableStateOf(initial?.restSeconds?.toString().orEmpty()) }
+    var restMax by rememberSaveable { mutableStateOf(initial?.restMaxSeconds?.toString().orEmpty()) }
     var autoRest by rememberSaveable { mutableStateOf(initial?.autoRest ?: false) }
     var caution by rememberSaveable { mutableStateOf(initial?.caution.orEmpty()) }
     var warmupTemplate by rememberSaveable { mutableStateOf(false) }
@@ -77,11 +78,12 @@ fun ExerciseEditor(
     val numericRange = min != null && max != null && min <= max
     val unspecifiedRange = first.isBlank() && last.isBlank()
     val restValue = positiveInt(rest)?.takeIf { it <= 86400 }
+    val restMaxValue = positiveInt(restMax)?.takeIf { restValue != null && it in restValue..86400 }
     val warm = positiveInt(warmCount)?.takeIf { it <= 30 }
     val ramp = positiveInt(rampCount)?.takeIf { it <= 30 }
     val warmRepCount = positiveInt(warmReps)
     val ready = name.isNotBlank() && sets != null && (numericRange || unspecifiedRange) && (amount != null || weight.isBlank()) &&
-        (rest.isBlank() || restValue != null) && (!warmupTemplate || (warmCount.isBlank() || warm != null) &&
+        (rest.isBlank() || restValue != null) && (restMax.isBlank() || restMaxValue != null) && (!warmupTemplate || (warmCount.isBlank() || warm != null) &&
             (rampCount.isBlank() || ramp != null) && (warmReps.isBlank() || warmRepCount != null))
     EditorSheet(title, close) {
         Field(name, stringResource(R.string.exercise_name), { name = it; picked = null }, Modifier.fillMaxWidth().testTag("exercise_name"))
@@ -141,6 +143,9 @@ fun ExerciseEditor(
                 { it?.name ?: "Без блока" }, { blockId = it?.id }, "training_block")
             if (blockId == null) Choice(block, PlanBlock.entries, { it.label }, { block = it }, "plan_block")
             Field(rest, "Отдых, с", { rest = it }, Modifier.testTag("planned_rest"), KeyboardType.Number)
+            if (restValue != null || restMax.isNotBlank()) {
+                Field(restMax, "Верхняя граница отдыха, с", { restMax = it }, keyboard = KeyboardType.Number)
+            }
             if (restValue != null) FilterChip(autoRest, { autoRest = !autoRest }, label = { Text("Запускать таймер после подхода") })
             Field(caution, "Ограничения упражнения", { caution = it }, singleLine = false)
             TextButton(onClick = { warmupTemplate = !warmupTemplate }) { Text("Шаблон разминочных подходов") }
@@ -182,7 +187,8 @@ fun ExerciseEditor(
                 } else plans
                 save(ExercisePlan(exercise, planned, initial?.individual.orEmpty(), block,
                     selection.takeIf { exercise.movement?.familyId != null } ?: MovementSelection.FIXED, skillId,
-                    blockId, restValue, autoRest && restValue != null, caution.trim()), exercise.takeIf { selected == null })
+                    blockId, restValue, autoRest && restValue != null, caution.trim(),
+                    restMaxValue), exercise.takeIf { selected == null })
             }
         }, modifier = Modifier.fillMaxWidth().testTag("save_exercise")) {
             Text(if (initial == null) stringResource(R.string.add) else stringResource(R.string.save))

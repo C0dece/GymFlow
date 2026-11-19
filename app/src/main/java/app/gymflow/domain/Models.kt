@@ -114,8 +114,12 @@ data class ExercisePlan(
     @EncodeDefault(EncodeDefault.Mode.NEVER) val restSeconds: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val autoRest: Boolean = false,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val caution: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val restMaxSeconds: Int? = null,
 ) {
-    init { require(restSeconds == null || restSeconds in 1..86400) }
+    init {
+        require(restSeconds == null || restSeconds in 1..86400)
+        require(restMaxSeconds == null || restSeconds != null && restMaxSeconds in restSeconds..86400)
+    }
     fun athlete(id: String) = Athlete(id, (individual[id] ?: sets).map { SetEntry(plan = it) })
 }
 
@@ -174,4 +178,7 @@ data class Program(
     val participantIds: List<String> = emptyList(),
     @EncodeDefault(EncodeDefault.Mode.NEVER) val completionCycle: CompletionCycle? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val caution: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val description: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val durationWeeks: Int? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val importSource: ProgramSource? = null,
 ) : Document

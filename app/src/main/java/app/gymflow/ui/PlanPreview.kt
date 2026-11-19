@@ -97,6 +97,12 @@ fun PlanPreview(
             if (known.isNotEmpty()) Muted(stringResource(if (known.size == volumes.size) R.string.plan_workload else R.string.plan_known_workload,
                 number(known.sum())))
             if (current.exercises.isEmpty()) Muted(stringResource(R.string.plan_empty))
+            val usedBlocks = current.exercises.mapTo(hashSetOf()) { it.plan.blockId }
+            current.trainingBlocks.filter { it.enabled && it.id !in usedBlocks && it.guidance.isNotBlank() }.forEach { block ->
+                SectionTitle(block.name)
+                Muted(block.requirement.label)
+                Muted(block.guidance)
+            }
             current.exercises.forEachIndexed { index, item ->
                 val block = current.trainingBlocks.find { it.id == item.plan.blockId }
                 if (block != null && current.exercises.getOrNull(index - 1)?.plan?.blockId != block.id) {
@@ -124,7 +130,7 @@ fun PlanPreview(
                                 Muted(stringResource(R.string.last_result, actualText(it, previous.exercise)))
                             }
                             if (item.plan.caution.isNotBlank()) InlineStatus(item.plan.caution, warning = true)
-                            item.plan.restSeconds?.let { Muted("Рекомендуемый отдых · $it с") }
+                            item.plan.restLabel()?.let { Muted("Рекомендуемый отдых · $it") }
                             val receipt = draft.progression.find { it.participantId == current.profile.id && it.exerciseEntryId == item.id }
                             val active = engine
                             val decision = receipt?.decision ?: remember(active, current.profile.id, item.plan, program, continuationTemplate) {

@@ -9,6 +9,9 @@ import app.gymflow.data.*
 import app.gymflow.domain.*
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.provider.OpenableColumns
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -133,19 +136,44 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
 
     private var creating = false
 
-    fun addFoundationProgram() {
+    internal fun readProgramFile(uri: Uri, target: String?, show: (ProgramInput) -> Unit) {
+        commands.trySend {
+            val input = withContext(Dispatchers.IO) {
+                val resolver = app.contentResolver
+                val content = readMarkdownFile(resolver, uri)
+                val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else null
+                } ?: "Программа.md"
+                try {
+                    resolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) {
+                    // Some providers grant access only for this read.
+                }
+                ProgramInput(uri.toString(), name, content, target)
+            }
+            show(input)
+        }
+    }
+
+    internal fun saveImportedProgram(review: ImportReview, scope: String, onSaved: (String) -> Unit) {
         commands.trySend {
             repo.update { state ->
-                if (state.programs.any { it.id == foundationProgramId }) emptyList()
-                else {
-                    val (program, exercises) = foundationProgram(state.exercises, LocalDate.now())
-                    val primary = state.availableProfiles.find { it.id == preferences.value.athlete } ?: state.availableProfiles.firstOrNull()
-                    val profile = primary ?: Profile(name = app.getString(R.string.self))
-                    exercises + program.copy(participantIds = listOf(profile.id)) + listOfNotNull(profile.takeIf { primary == null })
+                check(state.scope == scope) { "Папка GymFlow изменилась. Откройте импорт повторно." }
+                check(state.programs.find { it.id == review.program.id } == review.current) {
+                    "Программа изменилась. Проверьте импорт повторно."
                 }
+                val catalog = state.exercises.associateBy { it.id }
+                check(review.newExercises.none { ex -> state.exercises.any {
+                    it.id == ex.id || ProgramImport.key(it.name) == ProgramImport.key(ex.name)
+                } }) { "Каталог изменился. Проверьте сопоставления повторно." }
+                val newIds = review.newExercises.mapTo(hashSetOf()) { it.id }
+                check(review.program.days.flatMap { it.exercises }.all {
+                    it.exercise.id in newIds || catalog[it.exercise.id] == it.exercise
+                }) { "Каталог изменился. Проверьте сопоставления повторно." }
+                review.newExercises + review.program
             }
-            repo.schedule()
             flush.trySend(Unit)
+            onSaved(review.program.id)
         }
     }
 

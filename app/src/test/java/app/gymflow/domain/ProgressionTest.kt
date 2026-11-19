@@ -180,7 +180,7 @@ class ProgressionTest {
         val workout = good.last().copy(progression = listOf(receipt))
         listOf(policy, review, workout).forEach {
             val md = Markdown.write(it)
-            assertTrue(md.contains("gymflow_schema: 5"))
+            assertTrue(md.contains("gymflow_schema: 6"))
             assertEquals(it, Markdown.read(md)?.document)
         }
     }

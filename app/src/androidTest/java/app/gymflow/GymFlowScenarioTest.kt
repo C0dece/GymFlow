@@ -34,6 +34,98 @@ class GymFlowScenarioTest {
     private val folderName = "GymFlow_QA_" + UUID.randomUUID().toString().take(8)
     private val path get() = "$root/$folderName"
 
+    @Test fun programMarkdownFileImportsThroughSystemPickerAndReopens() {
+        createVault()
+        selectFolder()
+        val sourceName = "$folderName-import.md"
+        val external = InstrumentationRegistry.getArguments().getString("programSource")
+        val raw = if (external != null) shell("cat '$external'") else """
+            ---
+            type: training-program
+            program_schema: 1
+            title: QA File Import
+            schedule_mode: calendar
+            weekdays:
+              - MONDAY
+              - THURSDAY
+            ---
+            ## Утро
+            | Упражнение | Подходы × повторы | Отдых |
+            | --- | --- | --- |
+            | Тяга для импорта QA | 2 × 6-8 | 45-90 с |
+
+            ## Вечер
+            | Упражнение | Подходы × повторы | Отдых |
+            | --- | --- | --- |
+            | Тяга для импорта QA | 3 × 4-6 | 2 мин |
+        """.trimIndent()
+        val sourceFile = "$path/$sourceName"
+        val draft = ProgramImport.read(raw)
+        writeFile(sourceFile, raw)
+        click("nav_program")
+        scrollClick("import_program_file")
+        val drawer = device.wait(Until.findObject(By.descContains("roots")), 4000)
+        if (!device.hasObject(By.text(sourceName))) {
+            drawer?.click()
+            val model = shell("getprop ro.product.model").trim()
+            val storage = device.wait(Until.findObject(By.text(model)), 3000)
+                ?: device.findObject(By.text("Internal storage"))
+            requireNotNull(storage).click()
+            requireNotNull(device.wait(Until.findObject(By.text("Documents")), 5000)).click()
+            var parent = device.wait(Until.findObject(By.text(folderName)), 1100)
+            repeat(12) {
+                if (parent == null) {
+                    val x = device.displayWidth / 2
+                    device.swipe(x, device.displayHeight * 4 / 5, x, device.displayHeight / 4, 25)
+                    parent = device.wait(Until.findObject(By.text(folderName)), 400)
+                }
+            }
+            requireNotNull(parent).click()
+        }
+        requireNotNull(device.wait(Until.findObject(By.text(sourceName)), 5000)).click()
+        await("create_missing_exercises")
+        screenshot("program-import-preview")
+        scrollClick("create_missing_exercises")
+        ui.waitUntil(15_000) { runCatching { ui.onNodeWithTag("confirm_program_import").assertIsEnabled() }.isSuccess }
+        scrollClick("confirm_program_import")
+        val repo = app.repository
+        ui.waitUntil(15_000) { runBlocking { repo.library.first().programs.any { it.id == draft.template.id } } }
+        runBlocking { repo.flush() }
+        ui.activityRule.scenario.recreate()
+        click("nav_program")
+        ui.onAllNodesWithText(draft.template.title).onFirst().performScrollTo().assertIsDisplayed()
+        val state = runBlocking { repo.library.first() }
+        val actual = state.programs.single { it.id == draft.template.id }
+        assertEquals(draft.template.days.map { it.title }, actual.days.map { it.title })
+        assertEquals(draft.template.days.map { it.exercises.size }, actual.days.map { it.exercises.size })
+        assertEquals(draft.template.completionCycle, actual.completionCycle)
+        assertEquals(raw, shell("cat '$sourceFile'"))
+        assertTrue(state.sessions.none { it.status == SessionStatus.COMPLETED })
+        val roundtrip = Markdown.read(Markdown.write(actual))?.document
+        assertEquals(actual, roundtrip)
+
+        if (external == null) {
+            val profile = Profile(name = "Импорт QA")
+            val active = scheduledSession(actual, actual.days.first(), LocalDate.now(), listOf(profile)).start()
+            runBlocking { repo.update { listOf(profile, active) }; repo.flush() }
+            val updated = raw.replace("2 × 6-8", "4 × 6-8")
+            writeFile(sourceFile, updated)
+            val refresh = ui.onAllNodesWithText("Проверить источник")
+            if (refresh.fetchSemanticsNodes().isEmpty()) ui.onNodeWithText(actual.title).performScrollTo().performClick()
+            ui.onNodeWithText("Проверить источник").performScrollTo().performClick()
+            ui.waitUntil(15_000) { runCatching { ui.onNodeWithTag("confirm_program_import").assertIsEnabled() }.isSuccess }
+            scrollClick("confirm_program_import")
+            ui.waitUntil(15_000) { runBlocking {
+                repo.library.first().programs.singleOrNull()?.days?.first()?.exercises?.single()?.sets?.size == 4
+            } }
+            val refreshed = runBlocking { repo.library.first() }
+            assertEquals(actual.id, refreshed.programs.single().id)
+            assertEquals(actual.days.first().id, refreshed.programs.single().days.first().id)
+            assertEquals(active, refreshed.sessions.single { it.id == active.id })
+            assertEquals(updated, shell("cat '$sourceFile'"))
+        }
+    }
+
     @Test fun completionCycleWithRestOptionalBlocksAndCalendarPartner() {
         createVault()
         selectFolder()
@@ -147,13 +239,7 @@ class GymFlowScenarioTest {
                 assertEquals(1, cyclePosition(cycle, athlete.id, documents.filterIsInstance<Session>()).completed)
             }
         } finally { zip.delete() }
-        click("nav_program")
-        scrollClick("add_foundation_program")
-        ui.waitUntil(12_000) { runBlocking {
-            repo.library.first().programs.any { it.id == foundationProgramId && it.completionCycle?.targetSessions == 24 }
-        } }
-        ui.onNodeWithText("Силовой фундамент 8").performScrollTo().performClick()
-        screenshot("cycle-foundation")
+
     }
 
     @Test fun adaptiveMovementsPersistSeparatelyThroughSafAndExport() {
@@ -516,7 +602,7 @@ class GymFlowScenarioTest {
         assertEquals(WorkoutStatus.CANCELLED, saved.workouts[2].status)
         assertEquals("Дополнительный подход QA", saved.workouts[2].exercises.last().replaced.single().exercise.name)
         val raw = shell("cat '$filename'")
-        assertTrue(raw.contains("gymflow_schema: 5"))
+        assertTrue(raw.contains("gymflow_schema: 6"))
         assertTrue(raw.contains("## Партнёр QA · Грудь QA"))
         assertTrue(raw.contains("21.5 × 9"))
         val edit = raw + "\n## Заметка Obsidian\n\n[[Журнал]]\n"
@@ -758,7 +844,7 @@ class GymFlowScenarioTest {
             app.repository.flush()
         }
         val upgraded = shell("cat '$file'")
-        assertTrue(upgraded.contains("gymflow_schema: 5"))
+        assertTrue(upgraded.contains("gymflow_schema: 6"))
         assertEquals(imported.workouts, (Markdown.read(upgraded)?.document as Session).workouts)
         val backups = File(app.filesDir, "markdown-backups").walkTopDown().filter { it.isFile }.toList()
         assertTrue(backups.any { it.readText() == original })
