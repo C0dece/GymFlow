@@ -35,18 +35,15 @@ fun ExerciseEditor(
     val preferred = remember(library.programs) {
         library.programs.flatMap { it.days }.flatMap { it.exercises }.map { it.exercise.id }.toSet()
     }
-    val firstPlan = initial?.sets?.firstOrNull()
+    val fallback = SetPlan(prefs.initialWeight, prefs.minReps, prefs.maxReps)
+    var rows by rememberPlanSets(initial?.sets ?: List(prefs.initialSets) { fallback })
     var name by rememberSaveable { mutableStateOf(initial?.exercise?.name.orEmpty()) }
     var picked by rememberSaveable { mutableStateOf(initial?.exercise?.id) }
     var filter by rememberSaveable { mutableIntStateOf(0) }
-    var showOptions by rememberSaveable { mutableStateOf(initial != null) }
+    var showOptions by rememberSaveable { mutableStateOf(false) }
     var load by rememberSaveable { mutableStateOf(initial?.exercise?.load ?: Load.OTHER) }
     var unit by rememberSaveable { mutableStateOf(initial?.exercise?.unit ?: prefs.unit) }
-    var count by rememberSaveable { mutableStateOf((initial?.sets?.size ?: prefs.initialSets).toString()) }
-    var first by rememberSaveable { mutableStateOf(if (firstPlan?.repsKnown == false) "" else (firstPlan?.repsMin ?: prefs.minReps).toString()) }
-    var last by rememberSaveable { mutableStateOf(if (firstPlan?.repsKnown == false) "" else (firstPlan?.repsMax ?: prefs.maxReps).toString()) }
-    var weight by rememberSaveable { mutableStateOf(if (firstPlan?.weightKnown == false) "" else number(firstPlan?.weight ?: prefs.initialWeight)) }
-    var warmup by rememberSaveable { mutableStateOf(firstPlan?.warmup ?: false) }
+    var instructions by rememberSaveable { mutableStateOf(initial?.instructions.orEmpty()) }
     var block by rememberSaveable { mutableStateOf(initial?.block ?: PlanBlock.REQUIRED) }
     var selection by rememberSaveable { mutableStateOf(initial?.selection ?: MovementSelection.FIXED) }
     var skillId by rememberSaveable { mutableStateOf(initial?.skillId) }
@@ -71,21 +68,35 @@ fun ExerciseEditor(
             else -> exercise.id in recent
         }
     }.take(6)
-    val sets = count.toIntOrNull()?.takeIf { it in 1..30 }
-    val min = positiveInt(first)
-    val max = positiveInt(last)
-    val amount = decimal(weight)
-    val numericRange = min != null && max != null && min <= max
-    val unspecifiedRange = first.isBlank() && last.isBlank()
+    val plans = rows.plansOrNull()
     val restValue = positiveInt(rest)?.takeIf { it <= 86400 }
     val restMaxValue = positiveInt(restMax)?.takeIf { restValue != null && it in restValue..86400 }
-    val warm = positiveInt(warmCount)?.takeIf { it <= 30 }
-    val ramp = positiveInt(rampCount)?.takeIf { it <= 30 }
+    val warm = positiveInt(warmCount)?.takeIf { it <= 100 }
+    val ramp = positiveInt(rampCount)?.takeIf { it <= 100 }
     val warmRepCount = positiveInt(warmReps)
-    val ready = name.isNotBlank() && sets != null && (numericRange || unspecifiedRange) && (amount != null || weight.isBlank()) &&
-        (rest.isBlank() || restValue != null) && (restMax.isBlank() || restMaxValue != null) && (!warmupTemplate || (warmCount.isBlank() || warm != null) &&
-            (rampCount.isBlank() || ramp != null) && (warmReps.isBlank() || warmRepCount != null))
-    EditorSheet(title, close) {
+    val preparationValid = (warmCount.isBlank() || warm != null) && (rampCount.isBlank() || ramp != null) &&
+        (warmReps.isBlank() || warmRepCount != null) && rows.size + (warm ?: 0) + (ramp ?: 0) <= 100
+    val ready = name.isNotBlank() && plans != null && (rest.isBlank() || restValue != null) &&
+        (restMax.isBlank() || restMaxValue != null)
+    fun useTimedDefaults() {
+        if (initial == null && rows.all { it.result() == fallback }) {
+            rows = rows.map { PlanSetDraft(it.key, fallback.copy(weightKnown = false, repsKnown = false)) }
+        }
+    }
+    EditorSheet(title, close, footer = {
+        PlanEditorActions(close, stringResource(if (initial == null) R.string.add else R.string.save), ready, "save_exercise") {
+            if (plans != null && ready) {
+                val first = plans.first()
+                val exercise = selected ?: (initial?.exercise?.copy(id = newId()) ?: Exercise(name = name.trim())).copy(
+                    name = name.trim(), unit = unit, load = load, repsMin = first.repsMin, repsMax = first.repsMax, cardio = cardio,
+                )
+                save(ExercisePlan(exercise, plans, initial?.individual.orEmpty(), block,
+                    selection.takeIf { exercise.movement?.familyId != null } ?: MovementSelection.FIXED, skillId,
+                    blockId, restValue, autoRest && restValue != null, caution.trim(),
+                    restMaxValue, instructions.trim()), exercise.takeIf { selected == null })
+            }
+        }
+    }) {
         Field(name, stringResource(R.string.exercise_name), { name = it; picked = null }, Modifier.fillMaxWidth().testTag("exercise_name"))
         if (initial == null && name.isBlank() && library.exercises.isNotEmpty()) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -101,10 +112,7 @@ fun ExerciseEditor(
                     name = choice.name
                     load = choice.load
                     unit = choice.unit
-                    val timed = choice.tracksDuration
-                    first = if (timed) "" else choice.repsMin.toString()
-                    last = if (timed) "" else choice.repsMax.toString()
-                    if (timed) weight = ""
+                    if (choice.tracksDuration) useTimedDefaults()
                 }, label = { Text(choice.name) })
             }
         }
@@ -112,7 +120,7 @@ fun ExerciseEditor(
             if (selected == null) {
                 Choice(cardio, listOf(null) + CardioType.entries, { it?.label ?: "Силовое или другое упражнение" }, {
                     cardio = it
-                    if (it != null) { load = Load.OTHER; first = ""; last = ""; weight = "" }
+                    if (it != null) { load = Load.OTHER; useTimedDefaults() }
                 }, "exercise_cardio")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Load.entries.forEach { option ->
@@ -125,15 +133,6 @@ fun ExerciseEditor(
                     }
                 }
             } else Muted("${loadText(selected.load)} · ${unitText(selected.unit)}")
-            Field(count, stringResource(R.string.set_count), { count = it }, keyboard = KeyboardType.Number)
-            AdaptivePair {
-                Field(first, stringResource(R.string.min_reps), { first = it }, Modifier.weight(1f), KeyboardType.Number)
-                Field(last, stringResource(R.string.max_reps), { last = it }, Modifier.weight(1f), KeyboardType.Number)
-            }
-            Field(weight, stringResource(R.string.weight_unit, unitText(unit)), { weight = it }, keyboard = KeyboardType.Decimal)
-            FilterChip(warmup, { warmup = !warmup }, label = { Text(stringResource(R.string.warmup_first)) })
-        } else if (sets != null && min != null && max != null && amount != null) {
-            Muted(stringResource(R.string.plan_details, sets, repRange(min, max), number(amount), unitText(unit)))
         }
         OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.testTag("exercise_options")) {
             Text(stringResource(if (showOptions) R.string.hide_options else R.string.exercise_options))
@@ -153,7 +152,18 @@ fun ExerciseEditor(
                 Field(warmCount, "Разминочных подходов", { warmCount = it }, keyboard = KeyboardType.Number)
                 Field(rampCount, "Подводящих подходов", { rampCount = it }, keyboard = KeyboardType.Number)
                 Field(warmReps, "Повторов в этих подходах (необязательно)", { warmReps = it }, keyboard = KeyboardType.Number)
-                Muted("Вес этих подходов указывается вручную.")
+                OutlinedButton(onClick = {
+                    val reps = warmRepCount ?: 1
+                    val base = SetPlan(repsMin = reps, repsMax = reps, weightKnown = false, repsKnown = warmRepCount != null)
+                    val added = List(warm ?: 0) { base.copy(role = SetRole.WARMUP, warmup = true) } +
+                        List(ramp ?: 0) { base.copy(role = SetRole.RAMP) }
+                    rows = added.map { PlanSetDraft(newId(), it) } + rows
+                    warmupTemplate = false
+                    warmCount = ""
+                    rampCount = ""
+                    warmReps = ""
+                }, enabled = preparationValid && (warm != null || ramp != null)) { Text("Добавить перед рабочими") }
+
             }
             if (selected?.movement?.familyId != null) {
                 Choice(selection, MovementSelection.entries, { it.label }, { selection = it }, "movement_selection")
@@ -164,36 +174,10 @@ fun ExerciseEditor(
                     { skillId = it?.id }, "plan_skill")
             }
         }
+        Field(instructions, "Примечания к упражнению в плане", { instructions = it }, singleLine = false)
+        PlanSets(rows, selected?.unit ?: unit, fallback) { rows = it }
         options()
-        Button(enabled = ready, onClick = {
-            if (sets != null && ready) {
-                val low = min ?: firstPlan?.repsMin ?: prefs.minReps
-                val high = max ?: firstPlan?.repsMax ?: prefs.maxReps
-                val setPlan = SetPlan(amount ?: 0.0, low, high, warmup, weightKnown = amount != null,
-                    maxEffort = unspecifiedRange && firstPlan?.maxEffort == true, repsKnown = numericRange,
-                    targetReps = firstPlan?.targetReps?.takeIf { numericRange && it in low..high },
-                    role = firstPlan?.role?.takeUnless { it == SetRole.WARMUP && !warmup })
-                val exercise = selected ?: Exercise(name = name.trim(), unit = unit, load = load, repsMin = low, repsMax = high, cardio = cardio)
-                val same = initial != null && sets == initial.sets.size && firstPlan == setPlan
-                val plans = if (same) initial.sets else List(sets) { index ->
-                    setPlan.copy(warmup = warmup && index == 0, role = setPlan.role?.takeUnless { it == SetRole.WARMUP && index > 0 })
-                }
-                val planned = if (warmupTemplate && (warm != null || ramp != null)) {
-                    val reps = warmRepCount ?: 1
-                    val prepare = SetPlan(repsMin = reps, repsMax = reps, weightKnown = false, repsKnown = warmRepCount != null)
-                    List(warm ?: 0) { prepare.copy(role = SetRole.WARMUP, warmup = true) } +
-                        List(ramp ?: 0) { prepare.copy(role = SetRole.RAMP) } +
-                        plans.filter { it.purpose !in setOf(SetRole.WARMUP, SetRole.RAMP) }
-                } else plans
-                save(ExercisePlan(exercise, planned, initial?.individual.orEmpty(), block,
-                    selection.takeIf { exercise.movement?.familyId != null } ?: MovementSelection.FIXED, skillId,
-                    blockId, restValue, autoRest && restValue != null, caution.trim(),
-                    restMaxValue), exercise.takeIf { selected == null })
-            }
-        }, modifier = Modifier.fillMaxWidth().testTag("save_exercise")) {
-            Text(if (initial == null) stringResource(R.string.add) else stringResource(R.string.save))
-        }
-        TextButton(onClick = close, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.cancel)) }
+
     }
 }
 

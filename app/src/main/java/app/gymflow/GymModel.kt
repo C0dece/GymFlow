@@ -30,7 +30,7 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
     private var noteFlush: Job? = null
 
     init {
-        viewModelScope.launch { for (command in commands) runCommand(command) }
+        viewModelScope.launch { for (command in commands) runCommand(command = command) }
         viewModelScope.launch { for (request in flush) runCommand { repo.flush() } }
         viewModelScope.launch {
             repo.settings.recovered.filter { it }.collect {
@@ -40,13 +40,14 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun runCommand(command: suspend () -> Unit) {
+    private suspend fun runCommand(onError: ((String) -> Unit)? = null, command: suspend () -> Unit) {
         try {
             command()
         } catch (failure: Exception) {
             if (failure is CancellationException) throw failure
             Log.w("GymFlow", "operation_error category=${failure.javaClass.simpleName}")
-            message.value = failure.localizedMessage ?: app.getString(R.string.save_failed)
+            val error = failure.localizedMessage ?: app.getString(R.string.save_failed)
+            if (onError != null) onError(error) else message.value = error
         }
     }
 
@@ -122,6 +123,31 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun save(document: Document) { commands.trySend { repo.save(document); if (document is Program) repo.schedule(); flush.trySend(Unit) } }
+
+    fun saveProgram(scope: String, original: Program?, replacement: Program, exercise: Exercise?, result: (String?) -> Unit) {
+        commands.trySend {
+            try {
+                repo.update { state ->
+                    check(state.scope == scope) { "Папка изменилась. Откройте редактор повторно." }
+                    check(state.programs.find { it.id == replacement.id } == original) {
+                        "Программа уже изменилась. Проверьте черновик и откройте свежую версию."
+                    }
+                    check(exercise == null || state.exercises.none { it.id != exercise.id &&
+                        !it.archived && it.name.equals(exercise.name, ignoreCase = true) }) {
+                        "Такое упражнение уже есть в каталоге. Выберите его по названию."
+                    }
+                    val planned = if (original == null) emptyList() else updateUnusedPlans(original, replacement, state.sessions)
+                    listOfNotNull(exercise) + replacement + planned
+                }
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                result(failure.localizedMessage ?: app.getString(R.string.save_failed))
+                return@trySend
+            }
+            result(null)
+            try { repo.schedule() } finally { flush.trySend(Unit) }
+        }
+    }
     fun addMovementExamples() {
         commands.trySend {
             repo.update { state ->
@@ -138,6 +164,36 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
                 families.filter { candidate -> state.families.none { it.id == candidate.id } } + examples
             }
             flush.trySend(Unit)
+        }
+    }
+
+    fun saveCatalogExercise(scope: String, original: Exercise?, next: Exercise, result: (String?) -> Unit) {
+        commands.trySend {
+            try {
+                repo.update { library ->
+                    check(library.scope == scope) { "Папка изменилась. Откройте редактор повторно." }
+                    check(library.exercises.find { it.id == next.id } == original) { "Упражнение уже изменилось." }
+                    check(next.archived || library.exercises.none { !it.archived && it.id != next.id &&
+                        it.name.equals(next.name, ignoreCase = true) }) { "Такое имя уже есть в каталоге." }
+                    listOf(next)
+                }
+                flush.trySend(Unit)
+                result(null)
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                result(failure.localizedMessage ?: app.getString(R.string.save_failed))
+            }
+        }
+    }
+
+    fun correctMetrics(scope: String, original: Session, workout: ParticipantWorkout, metrics: Metrics, notes: String,
+        onError: (String) -> Unit, onSaved: () -> Unit) {
+        commands.trySend {
+            runCommand(onError) {
+                repo.correctMetrics(scope, original, workout, metrics, notes)
+                flush.trySend(Unit)
+                onSaved()
+            }
         }
     }
 
@@ -189,12 +245,15 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         id: String,
         extras: List<Document> = emptyList(),
         onSaved: () -> Unit = {},
+        onError: ((String) -> Unit)? = null,
         transform: (Session) -> Session,
     ) {
         commands.trySend {
-            repo.editSession(id, extras, transform)
-            flush.trySend(Unit)
-            onSaved()
+            runCommand(onError) {
+                repo.editSession(id, extras, transform)
+                flush.trySend(Unit)
+                onSaved()
+            }
         }
     }
 
@@ -376,11 +435,21 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun correctResult(sessionId: String, workoutId: String, exerciseId: String, original: SetEntry?, result: SetEntry, onSaved: () -> Unit) {
+    fun correctResult(sessionId: String, workoutId: String, exerciseId: String, original: SetEntry?, result: SetEntry,
+        onError: ((String) -> Unit)? = null, onSaved: () -> Unit) {
         commands.trySend {
-            repo.correctResult(sessionId, workoutId, exerciseId, original, result)
+            runCommand(onError) {
+                repo.correctResult(sessionId, workoutId, exerciseId, original, result)
+                flush.trySend(Unit)
+                onSaved()
+            }
+        }
+    }
+
+    fun correctRir(sessionId: String, workoutId: String, exerciseId: String, original: Int?, value: Int?) {
+        commands.trySend {
+            repo.correctRir(sessionId, workoutId, exerciseId, original, value)
             flush.trySend(Unit)
-            onSaved()
         }
     }
 

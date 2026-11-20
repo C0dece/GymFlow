@@ -228,14 +228,42 @@ class Repository(private val context: Context, private val journal: Journal, val
         }
     }
 
-    suspend fun correctResult(sessionId: String, workoutId: String, exerciseId: String, original: SetEntry?, result: SetEntry) = exclusive {
+    suspend fun correctResult(sessionId: String, workoutId: String, exerciseId: String, original: SetEntry?, result: SetEntry) =
+        correctWorkout(sessionId, workoutId) { it.recordCorrection(exerciseId, original, result).creditCycle() }
+
+    suspend fun correctRir(sessionId: String, workoutId: String, exerciseId: String, original: Int?, value: Int?) =
+        correctWorkout(sessionId, workoutId) { workout ->
+            check(workout.exercises.any { it.id == exerciseId }) { "Упражнение недоступно." }
+            workout.editExercise(exerciseId) { entry ->
+                val athlete = entry.athletes.single()
+                check(athlete.rir == original) { "Запас повторов уже изменился." }
+                entry.copy(athletes = listOf(athlete.copy(rir = value)))
+            }
+        }
+
+    private suspend fun correctWorkout(sessionId: String, workoutId: String, change: (ParticipantWorkout) -> ParticipantWorkout) = exclusive {
         val scope = settings.values.first().scope
         journal.withTransaction {
             val session = records.get(scope, sessionId)?.let(::decoded) as? Session ?: error("Тренировка не найдена")
             val workout = session.allWorkouts.firstOrNull { it.id == workoutId } ?: error("Тренировка не найдена")
             check(workout in session.completedWorkouts(workout.profile.id)) { "Тренировка ещё не завершена" }
-            val after = session.editWorkoutById(workoutId) { row -> row.recordCorrection(exerciseId, original, result).creditCycle() }
+            val after = session.editWorkoutById(workoutId, change)
             (listOf(after) + progressionReviews(scope, after, setOf(workout.profile.id))).forEach { stage(scope, it) }
+        }
+    }
+
+    suspend fun correctMetrics(scope: String, original: Session, workout: ParticipantWorkout, metrics: Metrics, notes: String) = exclusive {
+        check(settings.values.first().scope == scope) { "Папка изменилась. Откройте редактор повторно." }
+        journal.withTransaction {
+            val current = records.get(scope, original.id)?.let(::decoded) as? Session ?: error("Тренировка недоступна")
+            val row = current.allWorkouts.find { it.id == workout.id } ?: error("Тренировка участника недоступна")
+            check(row in current.completedWorkouts(row.profile.id) && current.notes == original.notes && row.metrics == workout.metrics) {
+                "Показатели уже изменились. Откройте редактор повторно."
+            }
+            val after = current.copy(notes = notes).editWorkoutById(row.id) { it.copy(metrics = metrics) }
+            if (stage(scope, after) && metrics != row.metrics) {
+                progressionReviews(scope, after, setOf(row.profile.id)).forEach { stage(scope, it) }
+            }
         }
     }
 
@@ -258,10 +286,18 @@ class Repository(private val context: Context, private val journal: Journal, val
 
     suspend fun editDocument(id: String, transform: (Document) -> Document) = exclusive {
         val scope = settings.values.first().scope
-        val original = records.get(scope, id)?.let(::decoded) ?: error("Запись не найдена")
-        val replacement = transform(original)
-        require(replacement.id == id)
-        if (stage(scope, replacement)) setOf(id) else emptySet()
+        journal.withTransaction {
+            val original = records.get(scope, id)?.let(::decoded) ?: error("Запись не найдена")
+            val replacement = transform(original)
+            require(replacement.id == id)
+            if (!stage(scope, replacement)) return@withTransaction emptySet()
+            val changed = mutableSetOf(id)
+            if (original is Program && replacement is Program && original.days != replacement.days) {
+                val sessions = records.all(scope).mapNotNull(::decodedOrNull).filterIsInstance<Session>()
+                updateUnusedPlans(original, replacement, sessions).forEach { if (stage(scope, it)) changed.add(it.id) }
+            }
+            changed
+        }
     }
 
     suspend fun updateDocument(scope: String, id: String, transform: (Document?) -> Document) = exclusive {
@@ -280,7 +316,7 @@ class Repository(private val context: Context, private val journal: Journal, val
             val self = fallback ?: Profile(name = "Я")
             val sessionIds = library.sessions.map { it.id }.toHashSet()
             val catalog = library.exercises.associateBy { it.id }
-            library.programs.forEach { program ->
+            library.programs.filterNot(Program::archived).forEach { program ->
                 val selected = if (program.participantIds.isEmpty()) listOf(self) else
                     program.participantIds.mapNotNull { id -> library.availableProfiles.find { it.id == id } }
                 if (selected.isEmpty()) return@forEach
@@ -325,7 +361,7 @@ class Repository(private val context: Context, private val journal: Journal, val
                     }
                 }
             }
-            val needsCycleProfile = library.programs.any { it.enabled && it.completionCycle != null &&
+            val needsCycleProfile = library.programs.any { !it.archived && it.enabled && it.completionCycle != null &&
                 it.participantIds.isEmpty() && it.days.any { day -> day.orderedExercises().isNotEmpty() } }
             if (fallback == null && (additions.isNotEmpty() || needsCycleProfile)) additions.add(self)
             additions
@@ -377,6 +413,7 @@ class Repository(private val context: Context, private val journal: Journal, val
                     null
                 }
             }.groupBy { it.document.id }
+            val changedPrograms = mutableListOf<Pair<Program, Program>>()
             journal.withTransaction {
                 remote.forEach { (id, files) ->
                     val record = existing[id]
@@ -400,12 +437,30 @@ class Repository(private val context: Context, private val journal: Journal, val
                     }
                     val reattached = next.copy(localOnly = false)
                     if (record != reattached) records.put(reattached)
+                    val incoming = ext.document
+                    if (incoming is Program && record != null && !record.pending && record.markdown != ext.markdown) {
+                        val before = decodedOrNull(record) as? Program
+                        if (before != null && before.days != incoming.days) changedPrograms += before to incoming
+                    }
                 }
                 existing.values.filter { it.id !in remote && it.source != null && !it.localOnly }.forEach { row ->
                     val source = row.source ?: return@forEach
                     if (source !in preparedEmpty) {
                         val conflict = if (source in unreadable) "Файл нечитаем, повреждён или заменён" else missingFile
                         if (row.conflict != conflict) records.put(row.copy(conflict = conflict))
+                    }
+                }
+            }
+            if (changedPrograms.isNotEmpty()) {
+                val available = records.all(scope).filter { it.conflict == null }.mapNotNull(::decodedOrNull).filterIsInstance<Session>()
+                changedPrograms.forEach { (before, after) ->
+                    updateUnusedPlans(before, after, available).forEach { session ->
+                        try {
+                            stage(scope, session)
+                        } catch (failure: Exception) {
+                            if (failure is kotlinx.coroutines.CancellationException) throw failure
+                            if (issues.size < 12) issues += "План «${session.title}»: ${failure.localizedMessage}"
+                        }
                     }
                 }
             }

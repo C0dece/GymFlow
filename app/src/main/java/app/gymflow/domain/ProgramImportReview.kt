@@ -52,6 +52,7 @@ internal fun reviewImport(
         id = current?.id ?: sourceProgram.id,
         anchor = current?.anchor ?: sourceProgram.anchor,
         enabled = current?.enabled ?: sourceProgram.enabled,
+        archived = current?.archived ?: sourceProgram.archived,
         participantIds = current?.participantIds ?: sourceProgram.participantIds,
         completionCycle = sourceProgram.completionCycle?.let { cycle ->
             cycle.copy(extensions = current?.completionCycle?.extensions ?: cycle.extensions)

@@ -270,6 +270,7 @@ private fun Catalog(library: Library, model: GymModel, close: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             Field(query, stringResource(R.string.search), { query = it })
             FilterChip(archived, { archived = !archived }, label = { Text(stringResource(R.string.archive)) })
+            if (!archived) OutlinedButton(onClick = { id = "new" }) { Text("Новое упражнение") }
         }
         items(entries, key = { it.id }) { entry ->
             CardBlock(onClick = { id = entry.id }) {
@@ -279,24 +280,56 @@ private fun Catalog(library: Library, model: GymModel, close: () -> Unit) {
         }
         if (entries.isEmpty()) item { Muted(stringResource(R.string.empty_catalog)) }
     }
-    library.exercises.find { it.id == id }?.let { entry ->
-        var name by rememberSaveable(id) { mutableStateOf(entry.name) }
-        var muscle by rememberSaveable(id) { mutableStateOf(entry.muscle) }
-        var notes by rememberSaveable(id) { mutableStateOf(entry.notes) }
-        var favorite by rememberSaveable(id) { mutableStateOf(entry.favorite) }
-        var archive by rememberSaveable(id) { mutableStateOf(entry.archived) }
-        EditorSheet(stringResource(R.string.edit_exercise), { id = null }) {
+    val target = id
+    if (target != null) {
+        val original = remember(target) { library.exercises.find { it.id == target } }
+        val newExerciseId = rememberSaveable(target) { newId() }
+        val entry = original ?: Exercise(id = newExerciseId, name = "")
+        var name by rememberSaveable(target) { mutableStateOf(entry.name) }
+        var muscle by rememberSaveable(target) { mutableStateOf(entry.muscle) }
+        var notes by rememberSaveable(target) { mutableStateOf(entry.notes) }
+        var favorite by rememberSaveable(target) { mutableStateOf(entry.favorite) }
+        var archive by rememberSaveable(target) { mutableStateOf(entry.archived) }
+        var load by rememberSaveable(target) { mutableStateOf(entry.load) }
+        var unit by rememberSaveable(target) { mutableStateOf(entry.unit) }
+        var cardio by rememberSaveable(target) { mutableStateOf(entry.cardio) }
+        var min by rememberSaveable(target) { mutableStateOf(entry.repsMin.toString()) }
+        var max by rememberSaveable(target) { mutableStateOf(entry.repsMax.toString()) }
+        var error by remember { mutableStateOf<String?>(null) }
+        var saving by remember { mutableStateOf(false) }
+        val first = positiveInt(min)
+        val last = positiveInt(max)
+        val loadLabels = Load.entries.map { loadText(it) }
+        val units = UnitWeight.entries.map { unitText(it) }
+        EditorSheet(stringResource(R.string.edit_exercise), { if (!saving) id = null }) {
             Field(name, stringResource(R.string.exercise_name), { name = it })
             Field(muscle, stringResource(R.string.muscle), { muscle = it })
             Field(notes, stringResource(R.string.note), { notes = it }, singleLine = false)
+            Choice(load, Load.entries, { loadLabels[it.ordinal] }, { load = it }, "catalog_load")
+            Choice(unit, UnitWeight.entries, { units[it.ordinal] }, { unit = it }, "catalog_unit")
+            Choice(cardio, listOf(null) + CardioType.entries, { it?.label ?: "Силовое или другое" }, { cardio = it }, "catalog_cardio")
+            AdaptivePair {
+                Field(min, stringResource(R.string.min_reps), { min = it }, Modifier.weight(1f), KeyboardType.Number)
+                Field(max, stringResource(R.string.max_reps), { max = it }, Modifier.weight(1f), KeyboardType.Number)
+            }
+            Muted("Параметры нагрузки используются в новых планах.")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(favorite, { favorite = !favorite }, label = { Text(stringResource(R.string.favorites)) })
                 FilterChip(archive, { archive = !archive }, label = { Text(stringResource(R.string.archive)) })
             }
+            error?.let { InlineStatus(it, true) }
+            if (first == null || last == null || first > last) InlineStatus("Проверьте диапазон повторов.", true)
             Button(onClick = {
-                model.save(entry.copy(name = name.trim(), muscle = muscle.trim(), notes = notes, archived = archive, favorite = favorite))
-                id = null
-            }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.save)) }
+                saving = true
+                val updated = entry.copy(name = name.trim(), muscle = muscle.trim(), notes = notes, archived = archive,
+                    favorite = favorite, load = load, unit = unit, cardio = cardio,
+                    repsMin = requireNotNull(first), repsMax = requireNotNull(last))
+                model.saveCatalogExercise(library.scope, original, updated) {
+                    saving = false
+                    if (it == null) id = null else error = it
+                }
+            }, enabled = !saving && name.isNotBlank() && first != null && last != null && first <= last,
+                modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.save)) }
         }
     }
 }

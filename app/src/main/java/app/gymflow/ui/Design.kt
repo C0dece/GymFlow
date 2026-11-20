@@ -137,18 +137,29 @@ fun AdaptivePair(
 }
 
 @Composable
-fun EditorSheet(title: String, close: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+fun EditorSheet(title: String, close: () -> Unit, footer: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit) {
     ModalBottomSheet(
         onDismissRequest = close,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        Column(
-            Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 22.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(title, style = MaterialTheme.typography.headlineMedium)
-            content()
+        val body: @Composable (Modifier) -> Unit = { modifier ->
+            Column(
+                modifier.verticalScroll(rememberScrollState())
+                    .padding(start = 18.dp, end = 18.dp, bottom = if (footer == null) 22.dp else 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(title, style = MaterialTheme.typography.headlineMedium)
+                content()
+            }
+        }
+        if (footer == null) body(Modifier.fillMaxWidth().imePadding())
+        else Column(Modifier.fillMaxWidth().imePadding()) {
+            body(Modifier.weight(1f, fill = false).fillMaxWidth())
+            Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer) {
+                Box(Modifier.padding(horizontal = 18.dp, vertical = 8.dp)) { footer() }
+            }
         }
     }
 }

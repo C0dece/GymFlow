@@ -305,6 +305,6 @@ internal object ProgramImport {
 }
 
 internal fun Program.importTemplateFingerprint(): String = digest(Json.encodeToString(
-    Program.serializer(), copy(anchor = "", enabled = false, participantIds = emptyList(), importSource = null,
+    Program.serializer(), copy(anchor = "", enabled = false, archived = false, participantIds = emptyList(), importSource = null,
         completionCycle = completionCycle?.copy(extensions = emptyMap()))
 ))

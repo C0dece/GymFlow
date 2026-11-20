@@ -49,6 +49,7 @@ fun ExerciseCard(
             if (editable) actions()
         }
         if (entry.plan.caution.isNotBlank()) InlineStatus(entry.plan.caution, warning = true)
+        if (entry.plan.instructions.isNotBlank()) Muted(entry.plan.instructions)
         library.movementTracks.find { it.profileId == profile.id && it.exerciseId == exercise.id }
             ?.limitations?.takeIf { it.isNotBlank() }?.let { InlineStatus(it, warning = true) }
         if (previous != null && (previous.weightKnown && previous.repsKnown || previous.measurements.isNotEmpty())) {
@@ -72,13 +73,13 @@ fun ExerciseCard(
                 SetRow(set, label, exercise, isActive, set.id == focusSet && set.status == SetStatus.PLANNED,
                     index, profile.compact, { edit(set) }, { toggle(set) }, correcting)
             }
-            if (!athlete.skipped && (editable || athlete.rir != null)) {
+            if (!athlete.skipped && (editable || correcting || athlete.rir != null)) {
                 CardBlock {
                     Text(stringResource(R.string.rir), style = MaterialTheme.typography.titleMedium)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         (0..4).forEach { value ->
                             FilterChip(athlete.rir == value, { rir(value) }, modifier = Modifier.testTag("rir_$value"),
-                                enabled = editable, label = { Text(if (value == 4) "4+" else "$value") })
+                                enabled = editable || correcting, label = { Text(if (value == 4) "4+" else "$value") })
                         }
                     }
                 }
@@ -122,17 +123,21 @@ private fun SetRow(set: SetEntry, label: String, exercise: Exercise, enabled: Bo
 }
 
 @Composable
-fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -> Unit, newResult: Boolean = false, save: (SetEntry) -> Unit) {
+fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -> Unit,
+    newResult: Boolean = false, history: Boolean = false,
+    orderActions: @Composable () -> Unit = {}, save: (SetEntry) -> Unit) {
     val initializingTimed = set.actual == null && exercise.tracksDuration
     var weight by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.weightKnown) number(set.proposed.weight) else "") }
     var reps by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.repsKnown) set.proposed.reps.toString() else "") }
     var note by rememberSaveable { mutableStateOf(set.proposed.note) }
     val amount = decimal(weight)
     val repCount = positiveInt(reps)
-    var purpose by rememberSaveable { mutableStateOf(set.plan.purpose) }
+    var planning by rememberSaveable { mutableStateOf(false) }
+    var confirmRemoval by rememberSaveable { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }
-    var minReps by rememberSaveable { mutableStateOf(set.plan.repsMin.toString().takeIf { set.plan.repsKnown }.orEmpty()) }
-    var maxReps by rememberSaveable { mutableStateOf(set.plan.repsMax.toString().takeIf { set.plan.repsKnown }.orEmpty()) }
+    var planDrafts by rememberPlanSets(listOf(set.plan))
+    val planDraft = planDrafts.single()
+    val canPlan = !newResult && !history && set.status == SetStatus.PLANNED
     var technique by rememberSaveable { mutableStateOf(set.actual?.technique) }
     val kinds = (exercise.movement?.measures.orEmpty() + set.proposed.measurements.keys +
         if (exercise.cardio != null) cardioMeasures else emptySet()).sortedBy { it.ordinal }
@@ -143,10 +148,21 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
     val measured = measurements.mapNotNull { (kind, value) -> value?.takeIf(kind::accepts)?.let { kind to it } }.toMap()
     val valid = measurements.size == measured.size && (weight.isBlank() || amount != null) &&
         (reps.isBlank() || repCount != null) && (measured.isNotEmpty() || exercise.cardio == null && amount != null && repCount != null)
-    val plan = set.plan.copy(role = purpose.takeUnless { it == set.plan.purpose } ?: set.plan.role,
-        warmup = purpose == SetRole.WARMUP)
     EditorSheet(stringResource(R.string.edit_set), close) {
         Muted(exercise.cardio?.label ?: loadText(exercise.load))
+        if (canPlan) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!planning, { planning = false }, label = { Text("Результат") })
+            FilterChip(planning, { planning = true }, modifier = Modifier.testTag("set_plan_tab"), label = { Text("План") })
+        }
+        if (planning && canPlan) {
+            PlanSetFields(planDraft, exercise.unit, "set_plan") { planDrafts = listOf(it) }
+            val plan = planDraft.result()
+            Button(onClick = { plan?.let { save(set.copy(plan = it, deferred = false)) } },
+                enabled = plan != null, modifier = Modifier.fillMaxWidth().testTag("save_active_set_plan")) { Text("Сохранить план подхода") }
+            TextButton(onClick = close) { Text(stringResource(R.string.cancel)) }
+            return@EditorSheet
+        }
+        if (!canPlan) Muted("План · " + plannedSetText(set.plan, exercise))
         if (exercise.cardio == null) StepField(weight, stringResource(R.string.weight_unit, unitText(exercise.unit)), { weight = it }, "set_weight", KeyboardType.Decimal) { step ->
             val delta = prefs.step * if (prefs.unit == exercise.unit) 1.0 else prefs.unit.toKg / exercise.unit.toKg
             val value = ((amount ?: 0.0) + delta * step).coerceAtLeast(0.0)
@@ -159,31 +175,16 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
             Field(observed[kind].orEmpty(), kind.label, { observed[kind] = it },
                 Modifier.testTag("measure_${kind.name}"), keyboard = KeyboardType.Decimal)
         }
-        Field(note, stringResource(R.string.note), { note = it }, singleLine = false)
-        TextButton(onClick = { advanced = !advanced }) { Text("Параметры подхода") }
+        Field(note, stringResource(R.string.note), { note = it }, Modifier.testTag("set_result_note"), singleLine = false)
+        TextButton(onClick = { advanced = !advanced }) { Text("Параметры результата") }
         if (advanced) {
-            Choice(purpose, SetRole.entries, { it.label }, { purpose = it }, "set_role")
             Choice(technique, listOf(null) + Technique.entries, { it?.label ?: "Без отметки техники" },
                 { technique = it }, "set_technique")
-            if (!newResult && set.status == SetStatus.PLANNED) {
-                AdaptivePair {
-                    Field(minReps, "План от", { minReps = it }, Modifier.weight(1f), KeyboardType.Number)
-                    Field(maxReps, "План до", { maxReps = it }, Modifier.weight(1f), KeyboardType.Number)
-                }
-                val low = positiveInt(minReps)
-                val high = positiveInt(maxReps)
-                val range = low != null && high != null && low <= high
-                OutlinedButton(onClick = {
-                    save(set.copy(plan = plan.copy(weight = amount ?: 0.0, weightKnown = amount != null,
-                        repsMin = low ?: set.plan.repsMin, repsMax = high ?: set.plan.repsMax,
-                        repsKnown = range, maxEffort = false, targetReps = null), deferred = false))
-                }, enabled = (weight.isBlank() || amount != null) && (range || minReps.isBlank() && maxReps.isBlank())) {
-                    Text("Сохранить план подхода")
-                }
-            }
+            if (newResult) Choice(planDraft.role, SetRole.entries, { it.label },
+                { planDrafts = listOf(planDraft.copy(role = it)) }, "set_role")
         }
         Button(onClick = {
-            if (valid) save(set.copy(plan = plan, actual = Actual(amount ?: 0.0, repCount ?: 1, note.trim(),
+            if (valid) save(set.copy(plan = if (newResult) planDraft.result() ?: set.plan else set.plan, actual = Actual(amount ?: 0.0, repCount ?: 1, note.trim(),
                 weightKnown = amount != null, repsKnown = repCount != null, measurements = measured, technique = technique),
                 status = SetStatus.COMPLETED, deferred = false))
         }, enabled = valid, modifier = Modifier.fillMaxWidth().testTag("save_set")) {
@@ -191,18 +192,34 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!newResult) {
-                TextButton(onClick = { save(set.copy(status = SetStatus.SKIPPED, deferred = false)) }) { Text(stringResource(R.string.skip)) }
-                TextButton(onClick = { save(set.copy(status = SetStatus.CANCELLED, deferred = false)) },
+                if (!history) TextButton(onClick = { save(set.copy(status = SetStatus.SKIPPED, deferred = false)) }) {
+                    Text(stringResource(R.string.skip))
+                }
+                TextButton(onClick = { if (set.status == SetStatus.COMPLETED && set.actual != null) confirmRemoval = true
+                    else save(set.copy(status = SetStatus.CANCELLED, deferred = false)) },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
                     Text(stringResource(R.string.remove_set))
                 }
                 if (set.status == SetStatus.SKIPPED || set.status == SetStatus.CANCELLED) {
-                    TextButton(onClick = { save(set.copy(status = SetStatus.PLANNED, deferred = false)) }) { Text(stringResource(R.string.return_to_plan)) }
+                    if (history && set.actual != null) TextButton(onClick = {
+                        save(set.copy(status = SetStatus.COMPLETED, deferred = false))
+                    }) { Text("Вернуть результат") }
+                    if (!history) TextButton(onClick = { save(set.copy(status = SetStatus.PLANNED, deferred = false)) }) {
+                        Text(stringResource(R.string.return_to_plan))
+                    }
                 }
             }
             TextButton(onClick = close) { Text(stringResource(R.string.cancel)) }
         }
+        orderActions()
     }
+    if (confirmRemoval) AlertDialog(onDismissRequest = { confirmRemoval = false }, title = { Text("Убрать выполненный подход?") },
+        text = { Text("Результат исключится из итогов. Его можно будет вернуть.") },
+        confirmButton = { Button(onClick = {
+            confirmRemoval = false
+            save(set.copy(status = SetStatus.CANCELLED, deferred = false))
+        }) { Text("Убрать") } },
+        dismissButton = { TextButton(onClick = { confirmRemoval = false }) { Text("Отмена") } })
 }
 
 @Composable
@@ -215,8 +232,8 @@ private fun StepField(value: String, label: String, change: (String) -> Unit, ta
 }
 
 @Composable
-fun MetricsEditor(session: Session, profile: Profile, close: () -> Unit, save: (Metrics, String) -> Unit) {
-    val initial = session.workout(profile.id)?.metrics ?: Metrics()
+fun MetricsEditor(session: Session, profile: Profile, close: () -> Unit,
+    initial: Metrics = session.workout(profile.id)?.metrics ?: Metrics(), save: (Metrics, String) -> Unit) {
     var body by rememberSaveable { mutableStateOf(initial.bodyWeightKg?.let(::number).orEmpty()) }
     var cardio by rememberSaveable { mutableStateOf(initial.cardioMinutes?.toString().orEmpty()) }
     var feeling by rememberSaveable { mutableStateOf(initial.feeling) }

@@ -54,13 +54,36 @@ fun repeatSession(source: Session, id: String, date: LocalDate, history: List<Se
 }
 
 fun plannedOn(program: Program, date: LocalDate): List<ProgramDay> {
-    if (!program.enabled || program.days.isEmpty() || program.completionCycle != null) return emptyList()
+    if (program.archived || !program.enabled || program.days.isEmpty() || program.completionCycle != null) return emptyList()
     val offset = ChronoUnit.DAYS.between(LocalDate.parse(program.anchor), date)
     if (offset < 0) return emptyList()
     if (!program.cycle) return program.days.filter { it.weekday == date.dayOfWeek }
     val spacing = program.interval.coerceAtLeast(1)
     if (offset % spacing != 0L) return emptyList()
     return listOf(program.days[(offset / spacing % program.days.size).toInt()])
+}
+
+internal fun updateUnusedPlans(before: Program, after: Program, sessions: List<Session>): List<Session> {
+    if (before.days == after.days) return emptyList()
+    return sessions.mapNotNull { session ->
+        if (session.programId != before.id || session.status != SessionStatus.PLANNED ||
+            session.started != null || session.progression.isNotEmpty() || session.otherWorkouts.isNotEmpty()) return@mapNotNull null
+        val prior = before.days.find { it.id == session.programDayId } ?: return@mapNotNull null
+        val next = after.days.find { it.id == prior.id }
+        if (prior == next || session.workouts.any { workout ->
+                val baseline = workout.withTemplate(prior)
+                workout.templateId != prior.id || workout.status != WorkoutStatus.PLANNED || workout.originalPlan != null ||
+                    workout.templateTitle != baseline.templateTitle || workout.templateNotes != baseline.templateNotes ||
+                    workout.trainingBlocks != baseline.trainingBlocks || workout.plans() != baseline.plans() ||
+                    workout.exercises.any { entry -> entry.replaced.isNotEmpty() || entry.athletes.any { athlete ->
+                        athlete.skipped || athlete.rir != null || athlete.sets.any { it.status != SetStatus.PLANNED || it.actual != null }
+                    } }
+            }) return@mapNotNull null
+        if (next == null) session.copy(status = SessionStatus.SKIPPED,
+            workouts = session.workouts.map { it.copy(status = WorkoutStatus.SKIPPED) })
+        else session.copy(title = if (session.title == prior.title) next.title else session.title,
+            workouts = session.workouts.map { it.withTemplate(next) })
+    }
 }
 
 fun scheduledSession(program: Program, day: ProgramDay, date: LocalDate, profiles: List<Profile>): Session {

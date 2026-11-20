@@ -22,7 +22,7 @@ import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 import kotlinx.coroutines.launch
 
-private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE, NOTES }
+private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, EDIT_METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE, NOTES }
 
 @Composable
 fun Workout(
@@ -72,7 +72,8 @@ private fun ColumnScope.ParticipantScreen(
     var sheet by rememberSaveable { mutableStateOf<Sheet?>(null) }
     var menu by remember { mutableStateOf(false) }
     var more by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<String?>(null) }
+    var editing by rememberSaveable { mutableStateOf<String?>(null) }
+    var setError by rememberSaveable { mutableStateOf<String?>(null) }
     var extraSet by remember { mutableStateOf<SetEntry?>(null) }
     var correcting by rememberSaveable { mutableStateOf(reviewing) }
     var moveToLast by remember { mutableStateOf<Int?>(null) }
@@ -109,13 +110,13 @@ private fun ColumnScope.ParticipantScreen(
         it.editWorkoutById(chosen.id, change)
     }
     fun status(value: WorkoutStatus) = edit { it.copy(status = value) }
-    fun record(exerciseId: String, result: SetEntry, rotate: Boolean) {
+    fun record(exerciseId: String, result: SetEntry, rotate: Boolean, expected: SetEntry) {
         var next: ParticipantWorkout? = null
         var detached = false
         model.session(session.id, onSaved = {
             close()
             if (onScreen && !detached) next?.let { chooseCurrent(it.profile.id, it.nextExerciseId()) }
-        }) { current ->
+        }, onError = { setError = it }) { current ->
             val activeWorkout = current.workout(personId)
             if (activeWorkout?.id != chosen.id || !activeWorkout.canEdit) {
                 detached = true
@@ -123,14 +124,15 @@ private fun ColumnScope.ParticipantScreen(
             } else {
                 val exerciseEntry = activeWorkout.exercises.find { it.id == exerciseId }
                 val originalSet = exerciseEntry?.athletes?.single()?.sets?.find { it.id == result.id }
-                val base = if (originalSet != null && (result.plan != originalSet.plan || result.status == SetStatus.CANCELLED)) {
+                check(originalSet == expected) { "Подход уже изменился. Откройте его повторно." }
+                val base = if (result.plan != originalSet.plan || result.status == SetStatus.CANCELLED) {
                     current.editWorkoutById(chosen.id) { it.withOriginalPlan() }
                 } else current
                 val updated = base.editAthlete(exerciseId, personId) { row ->
                     row.copy(sets = row.sets.map { if (it.id == result.id) result else it })
                 }
-                val rest = exerciseEntry?.plan?.restSeconds?.takeIf { exerciseEntry.plan.autoRest &&
-                    result.status == SetStatus.COMPLETED && originalSet?.status == SetStatus.PLANNED }
+                val rest = exerciseEntry.plan.restSeconds?.takeIf { exerciseEntry.plan.autoRest &&
+                    result.status == SetStatus.COMPLETED && originalSet.status == SetStatus.PLANNED }
                 val located = updated.editWorkout(personId) {
                     it.copy(currentExerciseId = exerciseId, restUntil = rest?.let { seconds ->
                         java.time.Instant.now().plusSeconds(seconds.toLong()).toString()
@@ -230,6 +232,7 @@ private fun ColumnScope.ParticipantScreen(
                         Action(stringResource(R.string.switch_day), "menu_switch_day") { open(Sheet.DAY) }
                     }
                     Action(stringResource(R.string.read_metrics)) { open(Sheet.METRICS) }
+                    if (canCorrect) Action("Изменить показатели и примечания") { open(Sheet.EDIT_METRICS) }
                     if (canCorrect && !correcting) Action(stringResource(R.string.correct_results), "correct_results") { menu = false; correcting = true }
                     if (!reviewing && session.status == SessionStatus.COMPLETED) Action(stringResource(R.string.repeat_workout), "repeat_workout") {
                         menu = false
@@ -326,12 +329,16 @@ private fun ColumnScope.ParticipantScreen(
                     if (set.status != SetStatus.COMPLETED && (!set.proposed.weightKnown || !set.proposed.repsKnown || !current.exercise.movement?.measures.isNullOrEmpty() || current.exercise.cardio != null)) {
                         editing = set.id
                         open(Sheet.SET)
-                    } else record(current.id, set.toggle(), rotate = true)
+                    } else record(current.id, set.toggle(), rotate = true, expected = set)
                 },
                 edit = { set -> editing = set.id; open(Sheet.SET) },
-                rir = { value -> model.session(session.id) {
-                    it.editAthlete(current.id, personId) { a -> a.copy(rir = value.takeUnless { a.rir == value }) }
-                } },
+                rir = { value ->
+                    if (canCorrect && correcting) model.correctRir(session.id, chosen.id, current.id, row.rir,
+                        value.takeUnless { row.rir == value })
+                    else model.session(session.id) {
+                        it.editAthlete(current.id, personId) { a -> a.copy(rir = value.takeUnless { a.rir == value }) }
+                    }
+                },
                 addSet = { if (canCorrect && correcting) {
                     val plan = row.sets.lastOrNull()?.plan ?: SetPlan(prefs.initialWeight, prefs.minReps, prefs.maxReps)
                     extraSet = SetEntry(plan = plan.copy(warmup = false, role = SetRole.WORK))
@@ -423,11 +430,38 @@ private fun ColumnScope.ParticipantScreen(
             } }, enabled = template != null, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.save)) }
         }
         Sheet.SET -> if (entry != null) {
-            val original = athlete?.sets?.find { it.id == editing }
+            val original = remember(chosen.id, entry.id, editing) { athlete?.sets?.find { it.id == editing } }
             val set = extraSet ?: original
-            if (set != null) SetEditor(set, entry.exercise, prefs, close, newResult = extraSet != null) { result ->
-                if (canCorrect && correcting) model.correctResult(session.id, chosen.id, entry.id, original, result, onSaved = close)
-                else record(entry.id, result, rotate = true)
+            val history = canCorrect && correcting
+            if (set != null) SetEditor(set, entry.exercise, prefs, close, newResult = extraSet != null, history = history,
+                orderActions = {
+                    if (editable && original != null && athlete != null && !athlete.skipped) {
+                        val index = athlete.sets.indexOfFirst { it.id == original.id }
+                        fun changeOrder(offset: Int, copy: Boolean = false) {
+                            model.session(session.id, onSaved = close, onError = { setError = it }) { current ->
+                                val workout = current.workout(personId)
+                                check(workout?.id == chosen.id && workout.canEdit) { "Тренировка уже изменилась." }
+                                current.editWorkoutById(chosen.id, ParticipantWorkout::withOriginalPlan).editAthlete(entry.id, personId) { row ->
+                                    val position = row.sets.indexOfFirst { it.id == original.id }
+                                    check(row.sets.getOrNull(position) == original) { "Подход уже изменился." }
+                                    check(copy || position + offset in row.sets.indices) { "Порядок подходов изменился." }
+                                    row.copy(sets = row.sets.toMutableList().apply {
+                                        if (copy) add(position + 1, SetEntry(plan = original.plan))
+                                        else add(position + offset, removeAt(position))
+                                    })
+                                }
+                            }
+                        }
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { changeOrder(-1) }, enabled = index > 0) { Text("Выше") }
+                            TextButton(onClick = { changeOrder(1) }, enabled = index in 0 until athlete.sets.lastIndex) { Text("Ниже") }
+                            TextButton(onClick = { changeOrder(0, copy = true) }, enabled = index >= 0) { Text("Копировать план") }
+                        }
+                    }
+                }) { result ->
+                if (canCorrect && correcting) model.correctResult(session.id, chosen.id, entry.id, original, result,
+                    onError = { setError = it }, onSaved = close)
+                else if (original != null) record(entry.id, result, rotate = true, expected = original)
             }
         }
         Sheet.GUIDANCE -> EditorSheet("Указания к тренировке", close) {
@@ -436,6 +470,12 @@ private fun ColumnScope.ParticipantScreen(
                 SectionTitle(block.name)
                 Muted(block.requirement.label)
                 Text(block.guidance)
+            }
+        }
+        Sheet.EDIT_METRICS -> if (canCorrect) {
+            val original = remember(session.id, chosen.id) { session to chosen }
+            MetricsEditor(original.first, profile, close, initial = original.second.metrics) { metrics, notes ->
+                model.correctMetrics(library.scope, original.first, original.second, metrics, notes, { setError = it }, close)
             }
         }
         Sheet.METRICS -> if (active) {
@@ -483,6 +523,10 @@ private fun ColumnScope.ParticipantScreen(
             dismissButton = { TextButton(onClick = close) { Text(stringResource(R.string.cancel)) } },
         )
         null -> Unit
+    }
+    setError?.let { error ->
+        AlertDialog(onDismissRequest = { setError = null }, title = { Text("Сохранение не завершено") }, text = { Text(error) },
+            confirmButton = { TextButton(onClick = { setError = null }) { Text("Понятно") } })
     }
 }
 

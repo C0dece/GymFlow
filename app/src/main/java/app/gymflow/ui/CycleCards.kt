@@ -13,7 +13,7 @@ internal fun CycleCards(
     library: Library, preferred: String, prepare: (Program, Profile, String?) -> Unit, extend: (Program, Profile) -> Unit,
 ) {
     val default = library.availableProfiles.find { it.id == preferred } ?: library.availableProfiles.firstOrNull()
-    val options = library.programs.filter { it.enabled && it.completionCycle != null }.flatMap { program ->
+    val options = library.programs.filter { !it.archived && it.enabled && it.completionCycle != null }.flatMap { program ->
         val people = if (program.participantIds.isEmpty()) listOfNotNull(default)
             else library.availableProfiles.filter { it.id in program.participantIds }
         people.map { program to it }

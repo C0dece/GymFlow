@@ -115,6 +115,7 @@ data class ExercisePlan(
     @EncodeDefault(EncodeDefault.Mode.NEVER) val autoRest: Boolean = false,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val caution: String = "",
     @EncodeDefault(EncodeDefault.Mode.NEVER) val restMaxSeconds: Int? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val instructions: String = "",
 ) {
     init {
         require(restSeconds == null || restSeconds in 1..86400)
@@ -181,4 +182,5 @@ data class Program(
     @EncodeDefault(EncodeDefault.Mode.NEVER) val description: String = "",
     @EncodeDefault(EncodeDefault.Mode.NEVER) val durationWeeks: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val importSource: ProgramSource? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val archived: Boolean = false,
 ) : Document

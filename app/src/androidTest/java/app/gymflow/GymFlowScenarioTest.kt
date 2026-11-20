@@ -12,6 +12,8 @@ import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiScrollable
+import androidx.test.uiautomator.UiSelector
 import androidx.test.uiautomator.Until
 import app.gymflow.data.Theme
 import app.gymflow.data.missingFile
@@ -467,10 +469,12 @@ class GymFlowScenarioTest {
         } }
         scrollClick("add_set")
         scrollClick("save_set")
+        scrollClick("rir_1")
         withActiveFile { _, session ->
             val corrected = session.otherWorkouts.single()
             assertEquals(3, corrected.exercises.last().athletes.single().sets.size)
             assertEquals(2, corrected.completed)
+            assertEquals(1, corrected.exercises.last().athletes.single().rir)
         }
         click("switch_day")
         scrollClick("start_day_${legs.id}")
@@ -1207,6 +1211,157 @@ class GymFlowScenarioTest {
         assertEquals("missing", shell("test ! -e '$path/Заметки/Локальный черновик.md' && printf missing"))
     }
 
+    @Test fun editsIndividualPlanSetsAndKeepsCompletedMarkdownHistory() {
+        createVault()
+        selectFolder()
+        val repo = app.repository
+        fun program() = runBlocking { repo.library.first().programs.single() }
+        fun waitProgram(predicate: (Program) -> Boolean) {
+            ui.waitUntil(15_000) { runBlocking { repo.library.first().programs.singleOrNull()?.let(predicate) == true } }
+        }
+        fun field(tag: String, value: String) {
+            await(tag)
+            ui.onNodeWithTag(tag).performScrollTo()
+            replace(tag, value)
+            hideKeyboard()
+        }
+        fun addDay(title: String) {
+            scrollClick("add_day_btn")
+            field("day_name", title)
+            scrollClick("save_day")
+            await("program_add_exercise")
+        }
+        fun addExerciseToDay(title: String) {
+            scrollClick("program_add_exercise")
+            field("exercise_name", title)
+        }
+        click("nav_program")
+        click("new_program")
+        field("program_name", "План с подходами QA")
+        scrollClick("save_program")
+        addDay("Спина QA")
+        addExerciseToDay("Тяга QA")
+
+        scrollClick("plan_set_0")
+        field("plan_0_weight", "0")
+        field("plan_0_reps", "12")
+        field("plan_0_reps_max", "")
+        scrollClick("plan_0_role")
+        scrollClick("plan_0_role_WARMUP")
+        scrollClick("plan_set_1")
+        field("plan_1_weight", "22,5")
+        field("plan_1_reps", "7")
+        field("plan_1_reps_max", "9")
+        ui.onNodeWithTag("plan_1_weight").performScrollTo().performClick()
+        screenshot("program-editor-keyboard")
+        hideKeyboard()
+        scrollClick("plan_copy_1")
+        scrollClick("plan_up_2")
+        field("plan_1_weight", "25,5")
+        scrollClick("plan_set_3")
+        scrollClick("plan_remove_3")
+        scrollClick("plan_undo")
+        scrollClick("plan_remove_3")
+        screenshot("program-editor-individual-sets")
+        scrollClick("save_exercise")
+        waitProgram { it.days.singleOrNull()?.exercises?.singleOrNull()?.sets?.map(SetPlan::weight) == listOf(0.0, 25.5, 22.5) }
+        assertEquals(listOf(12 to 12, 7 to 9, 7 to 9), program().days.single().exercises.single().sets.map { it.repsMin to it.repsMax })
+        assertEquals(SetRole.WARMUP, program().days.single().exercises.single().sets.first().purpose)
+
+        scrollClick("edit_program_exercise_0")
+        ui.onNodeWithText("Изменить количество").performScrollTo().performClick()
+        field("plan_set_count", "35")
+        scrollClick("apply_plan_count")
+        await("plan_set_34")
+        scrollClick("plan_set_0")
+        field("plan_0_weight", "-5")
+        ui.onNodeWithTag("save_exercise").assertIsNotEnabled()
+        device.pressBack()
+        await("edit_program_exercise_0")
+        assertEquals(3, program().days.single().exercises.single().sets.size)
+
+        addExerciseToDay("Разведение QA")
+        scrollClick("save_exercise")
+        waitProgram { it.days.single().exercises.size == 2 }
+        scrollClick("program_exercise_up_1")
+        waitProgram { it.days.single().exercises.first().exercise.name == "Разведение QA" }
+        device.pressBack()
+        addDay("Ноги QA")
+        device.pressBack()
+        scrollClick("program_day_up_1")
+        waitProgram { it.days.map(ProgramDay::title) == listOf("Ноги QA", "Спина QA") }
+        runBlocking { repo.flush() }
+        val programFile = "$path/Программы/План с подходами QA.md"
+        val original = shell("cat '$programFile'")
+        assertEquals(program().id, Markdown.read(original)?.document?.id)
+        val outside = original.replace(" | 25.5 | 7 | 9 | ", " | 27.75 | 7 | 9 | ")
+        assertNotEquals(original, outside)
+        writeFile(programFile, outside)
+        runBlocking { repo.refresh() }
+        ui.activityRule.scenario.recreate()
+        waitProgram { it.days.last().exercises.last().sets[1].weight == 27.75 }
+
+        click("nav_home")
+        scrollClick("start_training")
+        click("confirm_start_plan")
+        await("workout")
+        click("next_exercise")
+        ui.waitUntil(12_000) { ui.onAllNodesWithText("Тяга QA").fetchSemanticsNodes().isNotEmpty() }
+        scrollClick("edit_set_1")
+        field("set_weight", "28,25")
+        field("set_reps", "8")
+        field("set_result_note", "Контрольная запись QA")
+        scrollClick("save_set")
+        ui.waitUntil(12_000) { runBlocking {
+            repo.library.first().active()?.defaultWorkout?.exercises?.lastOrNull()?.athletes?.single()?.sets?.get(1)?.actual?.weight == 28.25
+        } }
+        click("finish_workout")
+        click("confirm_finish")
+        val (historyFile, history) = waitForFile(SessionStatus.COMPLETED)
+        val set = history.defaultWorkout.exercises.last().athletes.single().sets[1]
+        assertEquals(27.75, set.plan.weight, 0.0)
+        assertEquals("Контрольная запись QA", set.actual?.note)
+        assertEquals(8, set.actual?.reps)
+        val before = shell("cat '$historyFile'")
+
+        click("nav_program")
+        await("program_day_1")
+        scrollClick("program_day_1")
+        scrollClick("edit_program_exercise_1")
+        scrollClick("plan_set_1")
+        field("plan_1_weight", "31,25")
+        scrollClick("save_exercise")
+        waitProgram { it.days.last().exercises.last().sets[1].weight == 31.25 }
+        runBlocking { repo.flush() }
+        assertEquals(before, shell("cat '$historyFile'"))
+        assertEquals(1, shell("find '$path/Программы' -type f -name '*.md'").lineSequence().count { it.startsWith(path) })
+
+        scrollClick("edit_program_exercise_1")
+        scrollClick("plan_set_1")
+        field("plan_1_weight", "99")
+        val changedTitle = shell("cat '$programFile'").replace("# План с подходами QA", "# План поправлен снаружи QA")
+        writeFile(programFile, changedTitle)
+        runBlocking { repo.refresh() }
+        waitProgram { it.title == "План поправлен снаружи QA" }
+        scrollClick("save_exercise")
+        ui.waitUntil(12_000) { ui.onAllNodesWithText("Сохранение не завершено").fetchSemanticsNodes().isNotEmpty() }
+        ui.onNodeWithText("Понятно").performClick()
+        ui.onNodeWithTag("plan_1_weight").assertTextContains("99")
+        assertEquals(31.25, program().days.last().exercises.last().sets[1].weight, 0.0)
+        device.pressBack()
+        await("edit_program_exercise_1")
+        device.pressBack()
+        scrollClick("archive_program")
+        ui.onNodeWithText("В архив").performClick()
+        waitProgram(Program::archived)
+        ui.onNodeWithText("Архив программ").performScrollTo().performClick()
+        ui.onNodeWithText("План поправлен снаружи QA").performScrollTo().performClick()
+        scrollClick("archive_program")
+        waitProgram { !it.archived }
+        runBlocking { repo.flush() }
+        assertEquals(before, shell("cat '$historyFile'"))
+    }
+
     private fun createVault() {
         assertEquals("ready", shell("mkdir -p '$path' && test -d '$path' && printf ready"))
     }
@@ -1240,6 +1395,13 @@ class GymFlowScenarioTest {
                 requireNotNull(device.wait(Until.findObject(By.text("Documents")), 4000)).click()
             }
             target = device.wait(Until.findObject(By.text(selectedFolder)), 1600)
+            if (target == null) {
+                runCatching {
+                    UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(35)
+                        .scrollIntoView(UiSelector().text(selectedFolder))
+                }
+                target = device.wait(Until.findObject(By.text(selectedFolder)), 1200)
+            }
             repeat(6) {
                 if (target == null) {
                     val x = device.displayWidth / 2
@@ -1347,7 +1509,12 @@ class GymFlowScenarioTest {
 
     private fun await(tag: String) = ui.waitUntil(15_000) { ui.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
     private fun click(tag: String) { await(tag); ui.onNodeWithTag(tag).performClick() }
-    private fun scrollClick(tag: String) { await(tag); ui.onNodeWithTag(tag).performScrollTo().performClick() }
+    private fun scrollClick(tag: String) {
+        await(tag)
+        val node = ui.onNodeWithTag(tag)
+        if (!node.isDisplayed()) node.performScrollTo()
+        node.performClick()
+    }
 
     private fun screenshot(name: String) {
         ui.waitForIdle()

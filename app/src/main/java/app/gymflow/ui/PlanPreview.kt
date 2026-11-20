@@ -42,11 +42,12 @@ fun PlanPreview(
     val engine by rememberEngine(library)
     val program = library.programs.find { p -> p.days.any { it.id == current.templateId } }?.id ?: draft.programId
     val continuationTemplate = current.templateId.takeIf { repeated == null }
-    fun applyDecision(entryId: String, decision: ProgressionDecision, choice: UserProgressionChoice, final: List<SetPlan>) {
+    fun applyDecision(entryId: String, decision: ProgressionDecision, choice: UserProgressionChoice, final: List<SetPlan>,
+        editedPlan: ExercisePlan? = null) {
         val recipient = current.profile.id
         draft = draft.editWorkout(recipient) { row ->
             row.editExercise(entryId) { item ->
-                item.copy(plan = item.plan.copy(sets = final), athletes = listOf(Athlete(recipient, final.map { SetEntry(plan = it) })))
+                item.copy(plan = (editedPlan ?: item.plan).copy(sets = final), athletes = listOf(Athlete(recipient, final.map { SetEntry(plan = it) })))
             }
         }.let { updated -> updated.copy(
             progression = updated.progression.filterNot { it.participantId == recipient && it.exerciseEntryId == entryId } +
@@ -135,6 +136,7 @@ fun PlanPreview(
                                 Muted(stringResource(R.string.last_result, actualText(it, previous.exercise)))
                             }
                             if (item.plan.caution.isNotBlank()) InlineStatus(item.plan.caution, warning = true)
+                            if (item.plan.instructions.isNotBlank()) Muted(item.plan.instructions)
                             item.plan.restLabel()?.let { Muted("Рекомендуемый отдых · $it") }
                             val receipt = draft.progression.find { it.participantId == current.profile.id && it.exerciseEntryId == item.id }
                             val active = engine
@@ -184,15 +186,18 @@ fun PlanPreview(
     }
     editing?.let { id ->
         ExerciseEditor(stringResource(if (id == "new") R.string.add_exercise else R.string.change), library, prefs,
-            current.exercises.find { it.id == id }?.plan, { editing = null }) { plan, _ ->
+            current.exercises.find { it.id == id }?.plan, { editing = null }, programOptions = true,
+            trainingBlocks = current.trainingBlocks) { plan, _ ->
             val old = current.exercises.find { it.id == id }
             val originalDecision = draft.progression.find { it.participantId == current.profile.id && it.exerciseEntryId == id }?.decision
                 ?: old?.let { engine?.decide(current.profile.id, program, it.plan, continuationTemplate) }
             if (old != null && old.exercise.id == plan.exercise.id && originalDecision != null) {
-                applyDecision(id, originalDecision, UserProgressionChoice.MANUAL, plan.sets)
+                applyDecision(id, originalDecision, UserProgressionChoice.MANUAL, plan.sets, plan)
             } else {
                 draft = draft.editWorkout(current.profile.id) { row ->
-                    if (id == "new") row.addExercise(plan) else row.replaceExercise(id, plan)
+                    if (id == "new") row.addExercise(plan) else if (old?.exercise?.id != plan.exercise.id) row.replaceExercise(id, plan)
+                    else row.editExercise(id) { entry -> entry.copy(plan = plan,
+                        athletes = listOf(plan.athlete(row.profile.id))) }
                 }.let { next -> next.copy(progression = next.progression.filterNot {
                     it.participantId == current.profile.id && it.exerciseEntryId == id
                 }) }
@@ -205,7 +210,7 @@ fun PlanPreview(
 @Composable
 fun TemplatePicker(programs: List<Program>, selected: WorkoutTemplate?, choose: (WorkoutTemplate?) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    val days = remember(programs) { programs.flatMap { program -> program.days.map { program.title to it } } }
+    val days = remember(programs) { programs.filterNot(Program::archived).flatMap { program -> program.days.map { program.title to it } } }
     if (days.isEmpty()) return
     Box {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth().testTag("pick_template")) {

@@ -213,7 +213,8 @@ private fun Home(
     val today = LocalDate.now()
     val active = library.active()
     val finished = library.sessions.filter { it.status == SessionStatus.COMPLETED }
-    val planned = library.sessions.filter { it.status == SessionStatus.PLANNED }.sortedBy { it.date }
+    val archivedIds = library.programs.filter(Program::archived).mapTo(hashSetOf(), Program::id)
+    val planned = library.sessions.filter { it.status == SessionStatus.PLANNED && it.programId !in archivedIds }.sortedBy { it.date }
     val next = planned.firstOrNull()
     val plannedMember = next?.let { it.workout(preferences.athlete) ?: it.defaultWorkout }
     val plannedProgram = if (next != null && plannedMember != null) workoutProgram(library.programs, next, plannedMember) else null
@@ -221,7 +222,8 @@ private fun Home(
         else (plannedProgram ?: (if (next != null && plannedMember != null) {
             val tid = next.templateOf(plannedMember)
             library.programs.firstOrNull { p -> p.days.any { it.id == tid } }
-        } else null) ?: library.programs.firstOrNull { it.enabled && it.days.isNotEmpty() } ?: library.programs.firstOrNull { it.days.isNotEmpty() })
+        } else null) ?: library.programs.firstOrNull { !it.archived && it.enabled && it.days.isNotEmpty() }
+            ?: library.programs.firstOrNull { !it.archived && it.days.isNotEmpty() })
     val canSwitchDay = effectiveProgram != null && effectiveProgram.days.isNotEmpty()
     var choosePlannedDay by remember(next?.id) { mutableStateOf(false) }
     val upcoming = remember(library.sessions, library.programs, today, preferences.athlete) {

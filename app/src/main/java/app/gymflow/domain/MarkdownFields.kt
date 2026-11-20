@@ -37,6 +37,7 @@ internal object MarkdownFields {
         "highFatigue" to "Сильная усталость", "discomfort" to "Дискомфорт", "compact" to "Компактный режим",
         "color" to "Цвет", "skipped" to "Пропущено", "durationWeeks" to "Длительность в неделях",
         "guidance" to "Указания", "requirement" to "Обязательность", "autoRest" to "Автотаймер отдыха",
+        "instructions" to "Примечания к упражнению",
     )
     private val keys = labels.entries.associate { (key, label) -> label to key }
     private val numbers = Regex("""[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?""")
