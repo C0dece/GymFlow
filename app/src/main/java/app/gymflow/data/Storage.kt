@@ -68,7 +68,7 @@ val journalMigration = object : Migration(1, 2) {
 
 const val maxDocumentBytes = 1024 * 1024 / 2
 
-data class Node(val id: String, val name: String, val folder: Boolean)
+data class Node(val id: String, val name: String, val folder: Boolean, val parent: String, val path: String = name)
 
 class SafFolder(context: Context, private val tree: Uri) {
     private val resolver: ContentResolver = context.contentResolver
@@ -84,7 +84,7 @@ class SafFolder(context: Context, private val tree: Uri) {
         return resolver.query(query, columns, null, null, null)?.use { cursor ->
             if (cursor.extras.getBoolean(Docs.EXTRA_LOADING)) throw IOException("Папка ещё загружается")
             buildList {
-                while (cursor.moveToNext()) add(Node(cursor.getString(0), cursor.getString(1), cursor.getString(2) == directory))
+                while (cursor.moveToNext()) add(Node(cursor.getString(0), cursor.getString(1), cursor.getString(2) == directory, parent))
             }
         } ?: throw IOException("Папка недоступна")
     }
@@ -97,13 +97,20 @@ class SafFolder(context: Context, private val tree: Uri) {
 
     fun read(id: String): String = readMarkdownFile(resolver, uri(id))
 
+    fun rename(id: String, name: String): String =
+        Docs.renameDocument(resolver, uri(id), name)?.let(Docs::getDocumentId)
+            ?: throw IOException("Провайдер не подтвердил переименование")
+
     fun vaultId(create: Boolean, preferred: String? = null): String? {
-        val markers = children(root).filter { it.name == vaultMarker }
+        val markers = children(root).filter { it.name in setOf(vaultMarker, legacyVaultMarker) }
         if (markers.isEmpty() && !create) return null
         require(markers.size <= 1 && markers.none { it.folder }) { "Неоднозначный идентификатор папки GymFlow" }
         val existing = markers.singleOrNull()
         if (existing != null) {
-            val id = read(existing.id).trim()
+            val text = read(existing.id).trim()
+            val id = if (existing.name == legacyVaultMarker) text else text.lineSequence()
+                .singleOrNull { it.startsWith("gymflow_vault: ") }?.removePrefix("gymflow_vault: ")
+                ?: throw IOException("В маркере отсутствует ID папки GymFlow")
             require(runCatching { UUID.fromString(id).toString() }.getOrNull() == id) {
                 "Повреждён идентификатор папки GymFlow"
             }
@@ -111,8 +118,9 @@ class SafFolder(context: Context, private val tree: Uri) {
         }
         val id = preferred ?: UUID.randomUUID().toString()
         val marker = create(root, vaultMarker)
-        write(marker, "$id\n")
-        check(read(marker).trim() == id) { "Не удалось проверить идентификатор папки" }
+        val raw = vaultMetadata(id)
+        write(marker, raw)
+        check(read(marker) == raw) { "Не удалось проверить идентификатор папки" }
         return id
     }
 
@@ -122,7 +130,9 @@ class SafFolder(context: Context, private val tree: Uri) {
     }
 }
 
-internal const val vaultMarker = "gymflow-vault.md"
+internal const val vaultMarker = "Хранилище GymFlow.md"
+private const val legacyVaultMarker = "gymflow-vault.md"
+internal fun vaultMetadata(id: String) = "---\ngymflow_vault: $id\n---\n\n# Хранилище GymFlow\n"
 
 internal fun readMarkdownFile(resolver: ContentResolver, uri: Uri): String =
     resolver.openInputStream(uri)?.use(::readMarkdownStream) ?: throw IOException("Не удалось прочитать файл")

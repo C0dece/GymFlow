@@ -18,8 +18,9 @@ class MarkdownTest {
         assertTrue(golden.contains("> [!info]"))
         assertTrue(golden.contains("| 1 | 16 × 8-12 | 18 × 10 | Выполнен |  |"))
         val upgraded = Markdown.write(workout, decoded.freeText)
-        assertEquals(decoded, Markdown.read(upgraded))
-        assertTrue(upgraded.contains("gymflow_schema: 6"))
+        assertEquals(workout, Markdown.read(upgraded)?.document)
+        assertEquals(decoded.freeText, Markdown.read(upgraded)?.freeText)
+        assertTrue(upgraded.contains("gymflow_schema: 7"))
     }
 
     @Test fun oneTwoThreeAndManyParticipants() {
@@ -44,7 +45,7 @@ class MarkdownTest {
         val replaced = workout.editAthlete(id, person.id) { it.copy(skipped = true) }
             .editWorkout(person.id) { it.replaceExercise(id, plan.copy(exercise = Exercise(name = "Тяга"))) }
         assertEquals(replaced, Markdown.read(Markdown.write(replaced))?.document)
-        assertTrue(Markdown.write(replaced).contains("#### Заменено: Жим"))
+        assertTrue(Markdown.write(replaced).contains("Заменённые упражнения"))
     }
 
     @Test fun interruptedOrMalformedDataAreRejected() {
@@ -70,7 +71,7 @@ class MarkdownTest {
         val v1 = requireNotNull(Markdown.read(golden))
         assertEquals(v1.document, v0.document)
         val saved = Markdown.write(v0.document)
-        assertTrue(saved.startsWith("---\ngymflow_schema: 6"))
+        assertTrue(saved.startsWith("---\ngymflow_schema: 7"))
         assertEquals(v0.document, Markdown.read(saved)?.document)
     }
 
@@ -89,10 +90,7 @@ class MarkdownTest {
     }
 
     @Test fun importedObsidianFilesAreReadWithoutErrors() {
-        val dirs = listOf(
-            java.io.File("qa-output/test-import"),
-            java.io.File("d:/Заметки/Obsidian/Codece/Личное/Здоровье/Тренировки")
-        )
+        val dirs = listOf(java.io.File("qa-output/test-import"))
         for (dir in dirs) {
             if (!dir.isDirectory) continue
             val files = dir.walkTopDown().filter { it.isFile && it.extension == "md" }.toList()

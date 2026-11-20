@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -165,18 +165,25 @@ function planText(set) {
 
 export function sanitizeFilename(name) {
     return name
-        .replace(/[:\\/*?"<>|]/g, ' — ')
+        .replace(/[:\\/*?"<>|#^\[\]\p{Cc}]/gu, ' ')
+        .replace(/[\u2013\u2014]/g, '-')
+        .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{16,}\b/gi, '')
         .replace(/\s+/g, ' ')
         .trim()
-        .replace(/\.+$/, '');
+        .replace(/^[ .]+|[ .]+$/g, '')
+        .replace(/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i, 'Запись - $&');
 }
 
-export function filenameFor(doc) {
-    if (doc.kind === 'program') return sanitizeFilename(doc.title) + '.md';
-    if (doc.kind === 'profile') return sanitizeFilename(doc.name) + '.md';
-    if (doc.kind === 'exercise') return sanitizeFilename(doc.name) + '.md';
-    if (doc.kind === 'session') return `${doc.date} ${sanitizeFilename(doc.title)}.md`;
-    return doc.id + '.md';
+export function filenameFor(doc, occupied = new Set()) {
+    const fallback = { program: 'Программа', profile: 'Участник', exercise: 'Упражнение', session: 'Тренировка' }[doc.kind];
+    if (!fallback) throw new Error('Неизвестный тип файла');
+    const title = sanitizeFilename(doc.title ?? doc.name) || fallback;
+    const base = doc.kind === 'session' ? `${doc.date} - ${title}` : title;
+    for (let i = 1; ; i++) {
+        const suffix = i > 1 ? ` (${i})` : '';
+        const name = base.slice(0, 100 - suffix.length).trimEnd() + suffix + '.md';
+        if (!occupied.has(name.toLowerCase())) return name;
+    }
 }
 
 export function markdown(model) {
@@ -224,11 +231,9 @@ export function markdown(model) {
 
 function main() {
     const args = process.argv.slice(2);
-    const useUuid = args.includes('--uuid-names');
-    const filtered = args.filter(a => !a.startsWith('--'));
-    const [week1, week2, output] = filtered;
-    if (!week1 || !week2 || !output) {
-        throw new Error('Синтаксис: node scripts/import-obsidian.mjs <W43.md> <W44.md> <папка GymFlow> [--uuid-names]');
+    const [week1, week2, output] = args;
+    if (args.length !== 3 || args.some(a => a.startsWith('--'))) {
+        throw new Error('Синтаксис: node scripts/import-obsidian.mjs <W43.md> <W44.md> <папка GymFlow>');
     }
     const target = resolve(output);
     const result = convert(readFileSync(week1, 'utf8'), readFileSync(week2, 'utf8'));
@@ -236,12 +241,25 @@ function main() {
         'Упражнения': result.catalog, 'Участники': result.profiles };
 
     mkdirSync(target, { recursive: true });
+    let skipped = 0;
     for (const [folder, documents] of Object.entries(groups)) {
         const dir = join(target, folder);
         mkdirSync(dir, { recursive: true });
+        const files = readdirSync(dir, { withFileTypes: true });
+        const occupied = new Set(files.map(file => file.name.toLowerCase()));
+        const ids = new Set(files.filter(file => file.isFile() && /\.md$/i.test(file.name)).map(file => {
+            const source = readFileSync(join(dir, file.name), 'utf8');
+            return /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(source)?.[1].match(/^id:[ \t]*([0-9a-f-]{36})[ \t]*$/im)?.[1];
+        }).filter(Boolean));
         for (const document of documents) {
-            const fileName = useUuid ? document.id + '.md' : filenameFor(document);
-            writeFileSync(join(dir, fileName), markdown(document), { encoding: 'utf8' });
+            if (ids.has(document.id)) {
+                skipped++;
+                continue;
+            }
+            const fileName = filenameFor(document, occupied);
+            writeFileSync(join(dir, fileName), markdown(document), { encoding: 'utf8', flag: 'wx' });
+            occupied.add(fileName.toLowerCase());
+            ids.add(document.id);
         }
     }
 
@@ -251,6 +269,7 @@ function main() {
     console.log('Готово: ' + result.program.days.length + ' дня, ' + result.catalog.length + ' упражнений, ' +
         result.sessions.length + ' исторические сессии, ' + confirmed + ' подтверждённых подходов, ' +
         (actuals.length - confirmed) + ' записей веса без подтверждённых повторов.');
+    if (skipped) console.log('Существующих записей сохранено: ' + skipped + '.');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();

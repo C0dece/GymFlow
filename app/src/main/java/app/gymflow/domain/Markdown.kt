@@ -7,6 +7,7 @@ import java.util.UUID
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonObject
 
 interface DocumentCodec {
@@ -14,10 +15,17 @@ interface DocumentCodec {
     fun write(document: Document, notes: String = "", extraYaml: Map<String, String> = emptyMap()): String
 }
 
-data class MarkdownDocument(val document: Document, val freeText: String, val extraYaml: Map<String, String> = emptyMap())
+data class MarkdownDocument(
+    val document: Document,
+    val freeText: String,
+    val extraYaml: Map<String, String> = emptyMap(),
+    val fields: JsonObject? = null,
+    internal val legacyText: String? = null,
+)
 
 object Markdown : DocumentCodec {
-    const val schema = 6
+    const val schema = 7
+    private const val legacySchema = 6
     private const val open = "<!-- gymflow:json"
     private const val close = "gymflow:json -->"
     private const val reportStart = "<!-- gymflow:report -->"
@@ -26,6 +34,7 @@ object Markdown : DocumentCodec {
         classDiscriminator = "kind"
         encodeDefaults = true
         prettyPrint = true
+        ignoreUnknownKeys = true
     }
     private val reserved = setOf("gymflow_schema", "id", "kind", "date", "status", "participants")
     private val yamlKey = Regex("[\\p{L}_][\\p{L}\\p{N}_ -]*")
@@ -34,6 +43,9 @@ object Markdown : DocumentCodec {
     private val report = Regex("""(?m)^$reportStart\n[\s\S]*?^$reportEnd$""")
     private const val noteEnd = "<!-- /gymflow:note -->"
     private val noteBlock = Regex("""(?m)^<!-- gymflow:note ([0-9a-f-]{36}) -->\n([\s\S]*?)\n$noteEnd$""")
+    private const val fieldsStart = "<!-- gymflow:данные -->"
+    private const val fieldsEnd = "<!-- /gymflow:данные -->"
+    private val fieldsBlock = Regex("""(?m)^$fieldsStart\n([\s\S]*?)\n$fieldsEnd$""")
 
     private val legacyNegative = Regex("""(?m)^([ \t]*(?:"(?:\\.|[^"\\])*"[ \t]*:[ \t]*)?)\\u002d(?=\d)""")
 
@@ -43,7 +55,7 @@ object Markdown : DocumentCodec {
         if (frontmatter == null || !frontmatter.groupValues[1].lineSequence().any {
                 it.startsWith("gymflow_schema:")
             }) {
-            require(open !in text && reportStart !in text) { "Отсутствует заголовок GymFlow" }
+            require(open !in text && reportStart !in text && fieldsStart !in text) { "Отсутствует заголовок GymFlow" }
             return null
         }
         val yaml = frontmatterFields(frontmatter.groupValues[1])
@@ -52,27 +64,36 @@ object Markdown : DocumentCodec {
         require(version in 0..schema) { "Версия GymFlow $version не поддерживается" }
 
         val content = text.substring(frontmatter.range.last + 1)
+        if (version == schema) {
+            val id = requireNotNull(scalar("id"))
+            val kind = requireNotNull(scalar("kind"))
+            val region = requireNotNull(fieldsBlock.findAll(content).singleOrNull()) { "Нужен один раздел данных GymFlow" }
+            val source = region.groupValues[1]
+            val title = source.lineSequence().first()
+            require(title.startsWith("# ")) { "В начале раздела данных нужен заголовок" }
+            val fields = MarkdownFields.read(source.substringAfter('\n', ""))
+            val titleField = titleField(kind)
+            require("kind" !in fields && "id" !in fields && (titleField == null || titleField !in fields)) { "Дублируются ID, тип или заголовок" }
+            val tree = JsonObject(fields + mapOf("id" to JsonPrimitive(id), "kind" to JsonPrimitive(kind)) +
+                if (titleField == null) emptyMap() else mapOf(titleField to JsonPrimitive(MarkdownFields.decodeText(title.drop(2)))))
+            val metadata = json.decodeFromJsonElement(Document.serializer(), tree)
+            val document = withNoteBodies(metadata, fieldsBlock.replace(content, ""))
+            validate(document)
+            requireIdentifiers(tree, treeOf(document))
+            return MarkdownDocument(document, stripNotes(fieldsBlock.replace(content, "")), yaml.filterKeys { it !in reserved }, tree)
+        }
         val structure = block.findAll(content).toList().singleOrNull()
         require(structure != null) { "Отсутствует или дублируется блок GymFlow" }
         val payload = structure.groupValues[1]
         // Older writers escaped numeric minus signs together with hyphens in strings.
-        val readablePayload = if (version < schema) legacyNegative.replace(payload) { it.groupValues[1] + "-" } else payload
+        val readablePayload = if (version < legacySchema) legacyNegative.replace(payload) { it.groupValues[1] + "-" } else payload
         val raw = json.parseToJsonElement(readablePayload).jsonObject
         val normalized = migrate(version, raw)
         val metadata = if (version < 2 && normalized["kind"] == JsonPrimitive("session")) {
             json.decodeFromJsonElement(LegacySession.serializer(), JsonObject(normalized - "kind")).migrate()
         } else json.decodeFromJsonElement(Document.serializer(), normalized)
         val bodyContent = block.replace(report.replace(content, ""), "")
-        val entries = noteBlock.findAll(bodyContent).toList()
-        val bodies = entries.associate { it.groupValues[1] to it.groupValues[2] }
-        val document = when (metadata) {
-            is Session -> metadata.copy(workoutNotes = metadata.workoutNotes.map {
-                it.copy(body = requireNotNull(bodies[it.id]).removePrefix(noteHeading(it.created)))
-            })
-            is SportNote -> if (metadata.deleted) metadata else metadata.copy(body = requireNotNull(bodies[metadata.id]))
-            else -> metadata
-        }
-        require(entries.size == bodies.size && bodies.keys == noteBodies(document).keys) { "Повреждён блок заметок" }
+        val document = withNoteBodies(metadata, bodyContent)
         validate(document)
         require(scalar("id") == document.id && scalar("kind") == kind(document)) { "YAML и JSON описывают разные записи" }
         if (document is Session) {
@@ -90,9 +111,69 @@ object Markdown : DocumentCodec {
             }
             require(participantIds == document.participants.map { it.id }) { "Участники в YAML отличаются от JSON" }
         }
-        val readable = report.findAll(content).toList().singleOrNull()
+        val readable = report.findAll(content).singleOrNull()
         require(readable != null || version == 0) { "Отчёт GymFlow повреждён" }
-        return MarkdownDocument(document, noteBlock.replace(bodyContent, "").trim('\n'), yaml.filterKeys { it !in reserved })
+        val priorReport = readable?.value?.substringAfter('\n')?.substringBeforeLast('\n')
+        val amendedReport = priorReport?.takeIf { it.trim() != render(document).trim() }
+        val fields = if (version >= 2) normalized else null
+        return MarkdownDocument(document, stripNotes(bodyContent), yaml.filterKeys { it !in reserved }, fields, amendedReport)
+    }
+
+    private fun stripNotes(content: String) = noteBlock.replace(content, "").trim('\n')
+
+    private fun withNoteBodies(metadata: Document, content: String): Document {
+        val entries = noteBlock.findAll(content).toList()
+        val bodies = entries.associate { it.groupValues[1] to it.groupValues[2] }
+        val document = when (metadata) {
+            is Session -> metadata.copy(workoutNotes = metadata.workoutNotes.map {
+                it.copy(body = requireNotNull(bodies[it.id]).removePrefix(noteHeading(it.created)))
+            })
+            is SportNote -> if (metadata.deleted) metadata else metadata.copy(body = requireNotNull(bodies[metadata.id]))
+            else -> metadata
+        }
+        require(entries.size == bodies.size && bodies.keys == noteBodies(document).keys) { "Повреждён блок заметок" }
+        return document
+    }
+
+    private fun titleField(kind: String): String? = when (kind) {
+        "program", "session", "sport_note" -> "title"
+        "profile", "exercise", "movement_family", "movement_skill" -> "name"
+        else -> null
+    }
+
+    private fun treeOf(document: Document) = json.encodeToJsonElement(Document.serializer(), document).jsonObject
+
+    private fun requireIdentifiers(raw: JsonObject, decoded: JsonObject) {
+        if ("id" in decoded) require(raw["id"] == decoded["id"]) { "У записи отсутствует стабильный ID" }
+        decoded.forEach { (key, value) ->
+            val old = raw[key]
+            if (old is JsonObject && value is JsonObject) requireIdentifiers(old, value)
+            if (old is JsonArray && value is JsonArray) old.zip(value).forEach { (a, b) ->
+                if (a is JsonObject && b is JsonObject) requireIdentifiers(a, b)
+            }
+        }
+    }
+
+    private fun preserveUnknown(raw: kotlinx.serialization.json.JsonElement?, before: kotlinx.serialization.json.JsonElement?,
+        after: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement {
+        if (raw is JsonObject && before is JsonObject && after is JsonObject) {
+            return JsonObject(after.mapValues { (key, value) -> preserveUnknown(raw[key], before[key], value) } +
+                raw.filterKeys { it !in before && it !in after })
+        }
+        if (raw is JsonArray && before is JsonArray && after is JsonArray) {
+            val remaining = before.indices.toMutableSet()
+            return JsonArray(after.mapIndexed { index, value ->
+                val id = (value as? JsonObject)?.get("id")
+                val previous = remaining.firstOrNull { before[it] == value }
+                    ?: remaining.firstOrNull { id != null && (before[it] as? JsonObject)?.get("id") == id }
+                    ?: index.takeIf { id == null && before.size == after.size && it in remaining }
+                if (previous == null) value else {
+                    remaining.remove(previous)
+                    preserveUnknown(raw.getOrNull(previous), before[previous], value)
+                }
+            })
+        }
+        return after
     }
 
     private fun yamlScalar(value: String): String = when {
@@ -128,18 +209,37 @@ object Markdown : DocumentCodec {
 
     private fun noteHeading(created: String) = "### Заметка от $created\n\n"
 
-    override fun write(document: Document, notes: String, extraYaml: Map<String, String>): String {
+    override fun write(document: Document, notes: String, extraYaml: Map<String, String>) =
+        writeCurrent(document, notes, extraYaml, treeOf(document))
+
+    fun rewrite(document: Document, previous: MarkdownDocument?, notes: String? = null,
+        extraYaml: Map<String, String>? = null): String {
+        val next = treeOf(document)
+        val tree = previous?.fields?.let { preserveUnknown(it, treeOf(previous.document), next).jsonObject } ?: next
+        val text = notes ?: listOfNotNull(previous?.freeText?.takeIf { it.isNotBlank() }, previous?.legacyText?.let {
+            "## Прежний текст отчёта\n\n$it"
+        }).joinToString("\n\n")
+        return writeCurrent(document, text, extraYaml ?: previous?.extraYaml.orEmpty(), tree)
+    }
+
+    private fun writeCurrent(document: Document, notes: String, extraYaml: Map<String, String>, tree: JsonObject) =
+        writeDocument(document, notes, extraYaml, tree)
+
+    internal fun writeLegacy(document: Document, notes: String = "", extraYaml: Map<String, String> = emptyMap()) =
+        writeDocument(document, notes, extraYaml, null)
+
+    private fun writeDocument(document: Document, notes: String, extraYaml: Map<String, String>, tree: JsonObject?): String {
         validate(document)
-        require(listOf(open, close, reportStart, reportEnd).none { it in notes }) { "Заметка содержит служебный маркер" }
+        require(listOf(open, close, reportStart, reportEnd, fieldsStart, fieldsEnd).none { it in notes }) { "Заметка содержит служебный маркер" }
         require(extraYaml.all { (key, value) ->
             key !in reserved && key.matches(yamlKey) && frontmatterFields("$key: $value").keys == setOf(key)
         })
         return buildString {
             appendLine("---")
-            appendLine("gymflow_schema: $schema")
+            appendLine("gymflow_schema: ${if (tree == null) legacySchema else schema}")
             appendLine("id: ${document.id}")
             appendLine("kind: ${kind(document)}")
-            if (document is Session) {
+            if (tree == null && document is Session) {
                 appendLine("date: ${document.date}")
                 appendLine("status: ${document.status.name.lowercase()}")
                 appendLine("participants: [${document.participants.joinToString { it.id }}]")
@@ -151,11 +251,22 @@ object Markdown : DocumentCodec {
             }
             appendLine("---")
             appendLine()
-            appendLine(reportStart)
-            appendLine(render(document))
-            appendLine(reportEnd)
+            if (tree == null) {
+                appendLine(reportStart)
+                appendLine(render(document))
+                appendLine(reportEnd)
+            } else {
+                val field = titleField(kind(document))
+                val title = field?.let { (tree[it] as JsonPrimitive).content } ?: documentTitle(document)
+                appendLine(fieldsStart)
+                appendLine("# ${MarkdownFields.encodeText(title)}")
+                appendLine()
+                val body = MarkdownFields.write(JsonObject(tree - setOfNotNull("id", "kind", field)))
+                if (body.isNotEmpty()) appendLine(body)
+                appendLine(fieldsEnd)
+            }
             noteBodies(document).forEach { (id, body) ->
-                require(listOf(open, close, reportStart, reportEnd, "<!-- gymflow:note ", noteEnd).none { it in body }) {
+                require(listOf(open, close, reportStart, reportEnd, fieldsStart, fieldsEnd, "<!-- gymflow:note ", noteEnd).none { it in body }) {
                     "Заметка содержит служебный маркер"
                 }
                 appendLine()
@@ -170,12 +281,12 @@ object Markdown : DocumentCodec {
                 appendLine()
                 appendLine(notes)
             }
-            appendLine()
-            appendLine(open)
-            appendLine(
-                json.encodeToString(Document.serializer(), document).replace("-->", "--\\u003e")
-            )
-            appendLine(close)
+            if (tree == null) {
+                appendLine()
+                appendLine(open)
+                appendLine(json.encodeToString(Document.serializer(), document).replace("-->", "--\\u003e"))
+                appendLine(close)
+            }
         }
     }
 

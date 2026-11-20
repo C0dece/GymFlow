@@ -40,6 +40,9 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) model.restore(uri)
     }
+    val migrate = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) model.migrateVault(uri)
+    }
     BackHandler(catalog) { catalog = false }
     if (catalog) {
         Catalog(library, model) { catalog = false }
@@ -139,7 +142,12 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
                 OutlinedButton(onClick = { restore.launch(arrayOf("application/zip", "application/x-zip-compressed")) }) {
                     Text(stringResource(R.string.restore_backup))
                 }
+                if (path != null) OutlinedButton(onClick = { migrate.launch("GymFlow до миграции.zip") },
+                    modifier = Modifier.testTag("migrate_markdown")) {
+                    Text("Перевести папку на новый Markdown")
+                }
             }
+            if (path != null) Muted("Миграция сначала сохраняет исходники и таблицу переименований в ZIP. Для чтения нового формата обновите GymFlow на всех устройствах.")
         }
     }
 

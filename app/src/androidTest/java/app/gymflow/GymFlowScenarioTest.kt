@@ -388,7 +388,7 @@ class GymFlowScenarioTest {
         runBlocking { repo.schedule(date); repo.schedule(date.plusDays(2)); repo.flush() }
         val files = shell("find '$path/Тренировки' -type f -name '*.md'").lineSequence().filter { it.startsWith(path) }.toList()
         assertEquals(2, files.size)
-        val moved = files.single { it.endsWith("/${later.id}.md") }
+        val moved = files.single { Markdown.read(shell("cat '$it'"))?.document?.id == later.id }
         assertEquals(back.id, (Markdown.read(shell("cat '$moved'"))?.document as Session).defaultWorkout.templateId)
     }
 
@@ -595,7 +595,8 @@ class GymFlowScenarioTest {
         ui.waitUntil(12_000) { runCatching { ui.onNodeWithText("Дополнительное упражнение QA").assertIsDisplayed() }.isSuccess }
         click("exercise_menu")
         click("skip_exercise")
-        ui.onNodeWithText("Упражнение пропущено").assertIsDisplayed()
+        ui.waitUntil(12_000) { ui.onAllNodesWithText("Упражнение пропущено").fetchSemanticsNodes().isNotEmpty() }
+        ui.onNodeWithText("Упражнение пропущено").performScrollTo().assertIsDisplayed()
         click("workout_menu")
         click("finish_group")
         click("confirm_finish")
@@ -606,9 +607,10 @@ class GymFlowScenarioTest {
         assertEquals(WorkoutStatus.CANCELLED, saved.workouts[2].status)
         assertEquals("Дополнительный подход QA", saved.workouts[2].exercises.last().replaced.single().exercise.name)
         val raw = shell("cat '$filename'")
-        assertTrue(raw.contains("gymflow_schema: 6"))
-        assertTrue(raw.contains("## Партнёр QA · Грудь QA"))
-        assertTrue(raw.contains("21.5 × 9"))
+        assertTrue(raw.contains("gymflow_schema: 7"))
+        assertTrue(raw.contains("Имя: Партнёр QA"))
+        assertTrue(raw.contains("Название дня: Грудь QA"))
+        assertTrue(raw.contains("| 21.5 | 9 |"))
         val edit = raw + "\n## Заметка Obsidian\n\n[[Журнал]]\n"
         writeFile(filename, edit)
         runBlocking { app.repository.refresh() }
@@ -670,7 +672,7 @@ class GymFlowScenarioTest {
         scrollClick("save_profile")
         val disk = shell("find '$path' -type f -name '*.md'").lineSequence().filter { it.startsWith("$path/") }.toList()
         expected.forEach { (id, color) ->
-            val filename = disk.single { it.endsWith("/$id.md") }
+            val filename = disk.single { Markdown.read(shell("cat '$it'"))?.document?.id == id }
             assertEquals(color, (Markdown.read(shell("cat '$filename'"))?.document as Profile).color)
         }
     }
@@ -848,7 +850,7 @@ class GymFlowScenarioTest {
             app.repository.flush()
         }
         val upgraded = shell("cat '$file'")
-        assertTrue(upgraded.contains("gymflow_schema: 6"))
+        assertTrue(upgraded.contains("gymflow_schema: 7"))
         assertEquals(imported.workouts, (Markdown.read(upgraded)?.document as Session).workouts)
         val backups = File(app.filesDir, "markdown-backups").walkTopDown().filter { it.isFile }.toList()
         assertTrue(backups.any { it.readText() == original })
@@ -989,7 +991,7 @@ class GymFlowScenarioTest {
         selectFolder()
         val repo = app.repository
         val vault = runBlocking { repo.settings.values.first().vaultId }
-        assertEquals(vault, shell("cat '$path/gymflow-vault.md'").trim())
+        assertTrue(shell("cat '$path/Хранилище GymFlow.md'").contains("gymflow_vault: $vault"))
         val profile = Profile(name = "Участник заметок QA")
         val program = Program(title = "Программа заметок QA")
         val planned = Session(title = "Тренировка заметок QA", date = LocalDate.now().toString(), participants = listOf(profile))
@@ -1039,7 +1041,7 @@ class GymFlowScenarioTest {
         assertEquals(planned.id, note.sessionId)
         assertEquals(program.id, note.programId)
         runBlocking { repo.flush() }
-        val noteFile = "$path/Заметки/${note.id}.md"
+        val noteFile = "$path/Заметки/Восстановление QA.md"
         val raw = shell("cat '$noteFile'")
         assertTrue(raw.contains("После занятия. [[Сон]]"))
         writeFile(noteFile, raw.replace("[[Сон]]", "[[Гидратация]]"))
@@ -1076,8 +1078,8 @@ class GymFlowScenarioTest {
         selectFolder(movedName)
         assertEquals(vault, runBlocking { repo.settings.values.first().vaultId })
         runBlocking { repo.refresh(); repo.flush() }
-        assertTrue(shell("cat '$moved/Заметки/${note.id}.md'").contains("Изменено офлайн"))
-        assertEquals("1", shell("find '$moved' -name '${note.id}.md' | wc -l").trim())
+        assertTrue(shell("cat '$moved/Заметки/Восстановление QA.md'").contains("Изменено офлайн"))
+        assertEquals("1", shell("find '$moved' -name 'Восстановление QA.md' | wc -l").trim())
 
         val backup = File.createTempFile("gymflow-audit-", ".zip", app.cacheDir)
         val archive = Uri.fromFile(backup)
@@ -1105,12 +1107,104 @@ class GymFlowScenarioTest {
             ui.onNodeWithText("Удалить", substring = false).performClick()
             ui.waitUntil(12_000) { runBlocking { repo.library.first().notes.isEmpty() } }
             runBlocking { repo.flush() }
-            val tombstone = Markdown.read(shell("cat '$root/$restoredName/Заметки/${note.id}.md'"))?.document as SportNote
+            val tombstone = Markdown.read(shell("cat '$root/$restoredName/Заметки/Восстановление QA.md'"))?.document as SportNote
             assertTrue(tombstone.deleted)
             assertEquals("", tombstone.body)
         } finally {
             backup.delete()
         }
+    }
+
+    @Test fun readableVaultMigratesThenTracksExternalEditsById() {
+        createVault()
+        selectFolder()
+        click("nav_settings")
+        ui.onNodeWithTag("migrate_markdown").performScrollTo().assertIsDisplayed()
+        screenshot("markdown-v7-migration-settings")
+        click("nav_home")
+        val repo = app.repository
+        val exercise = Exercise(name = "Тяга блока")
+        val day = WorkoutTemplate(title = "Спина", exercises = listOf(ExercisePlan(exercise, listOf(SetPlan(16.0)))))
+        val program = Program(title = "Силовая программа", days = listOf(day))
+        val person = Profile(name = "Участник QA")
+        val session = Session(title = "Грудь и трицепс", date = LocalDate.now().toString(), participants = listOf(person))
+            .copy(programId = program.id).start().addExercise(ExercisePlan(exercise, listOf(SetPlan(18.0))))
+        val done = session.editWorkout(person.id) { workout ->
+            workout.editExercise(workout.exercises.single().id) { entry ->
+                entry.copy(athletes = entry.athletes.map { it.copy(sets = it.sets.map(SetEntry::toggle)) })
+            }
+        }.finish()
+        val note = SportNote(title = "Цели на месяц", sessionId = done.id, body = "[[${exercise.id}|Упражнение]]")
+        val legacy = listOf("Программы" to program, "Тренировки" to done, "Упражнения" to exercise, "Заметки" to note)
+        legacy.forEach { (directory, document) ->
+            shell("mkdir -p '$path/$directory'")
+            writeFile("$path/$directory/${document.id}.md", Markdown.writeLegacy(document))
+        }
+        val userNote = "$path/Прочее.md"
+        writeFile(userNote, "# Неизвестная запись\n\nОставить как есть.")
+        val backup = File(requireNotNull(app.getExternalFilesDir("qa")), "markdown-v7-migration.zip")
+        assertEquals(4, runBlocking { repo.migrateVault(Uri.fromFile(backup)) })
+        assertEquals(0, runBlocking { repo.migrateVault(Uri.fromFile(backup)) })
+        val programFile = "$path/Программы/Силовая программа.md"
+        val sessionFile = "$path/Тренировки/${done.date} - Грудь и трицепс.md"
+        val noteFile = "$path/Заметки/Цели на месяц.md"
+        val exerciseFile = "$path/Упражнения/Тяга блока.md"
+        for ((file, document) in listOf(programFile to program, sessionFile to done, exerciseFile to exercise)) {
+            val raw = shell("cat '$file'")
+            assertFalse(raw.contains("gymflow:json"))
+            assertEquals(document, Markdown.read(raw)?.document)
+        }
+        assertTrue(shell("cat '$noteFile'").contains("[[Упражнения/Тяга блока|Упражнение]]"))
+        assertTrue(shell("cat '$noteFile'").contains("gymflow_links:"))
+        assertEquals("# Неизвестная запись\n\nОставить как есть.", shell("cat '$userNote'"))
+        java.util.zip.ZipFile(backup).use { zip ->
+            assertTrue(zip.getEntry("Переименования.tsv") != null)
+            for ((directory, document) in legacy) {
+                val original = zip.getInputStream(zip.getEntry("Исходники/$directory/${document.id}.md"))
+                    .bufferedReader().use { it.readText() }
+                assertEquals(document, Markdown.read(original)?.document)
+            }
+        }
+
+        val moved = "$path/Архив/Предыдущие занятия/Новый заголовок файла.md"
+        assertEquals("moved", shell("mkdir -p '$path/Архив/Предыдущие занятия' && mv '$sessionFile' '$moved' && printf moved"))
+        val original = shell("cat '$moved'")
+        val previous = done.defaultWorkout.exercises.single().athletes.single().sets.single().actual!!
+        val changed = original.replace(" | ${previous.weight} | ${previous.reps} | ", " | 29.0 | 11 | ")
+            .replace("# Грудь и трицепс", "# Тренировка после правки")
+        assertNotEquals(original, changed)
+        writeFile(moved, changed)
+        writeFile(programFile, shell("cat '$programFile'").replace("# Силовая программа", "# Тяжёлая программа"))
+        writeFile(noteFile, shell("cat '$noteFile'").replace("|Упражнение", "|Проверить подходы"))
+        runBlocking { repo.refresh() }
+        ui.activityRule.scenario.recreate()
+        val state = runBlocking { repo.library.first() }
+        assertEquals("Тяжёлая программа", state.programs.single().title)
+        assertTrue(state.notes.single().body.contains("Проверить подходы"))
+        val imported = state.sessions.single()
+        assertEquals("Тренировка после правки", imported.title)
+        assertEquals(29.0, imported.defaultWorkout.exercises.single().athletes.single().sets.single().actual!!.weight, 0.0)
+        runBlocking {
+            repo.editDocument(done.id) { (it as Session).copy(notes = "Записано из приложения") }
+            repo.flush()
+        }
+        assertTrue(shell("cat '$moved'").contains("Записано из приложения"))
+        assertEquals("missing", shell("test ! -e '$sessionFile' && printf missing"))
+        assertEquals("gone", shell("rm '$programFile' && printf gone"))
+        runBlocking { repo.refresh() }
+        assertEquals(missingFile, runBlocking { repo.library.first().records.single { it.id == program.id }.conflict })
+        runBlocking { repo.resolve(program.id, true) }
+        assertTrue(shell("cat '$path/Программы/Тяжёлая программа.md'").contains("id: ${program.id}"))
+
+        val staged = SportNote(title = "Локальный черновик", body = "Запись на устройстве")
+        runBlocking { repo.save(staged) }
+        val createdOutside = "$path/Архив/Внешняя заметка.md"
+        val external = Markdown.write(staged.copy(title = "Внешняя заметка"))
+        writeFile(createdOutside, external)
+        runBlocking { repo.flush() }
+        assertEquals(external, shell("cat '$createdOutside'"))
+        assertNotNull(runBlocking { repo.library.first().records.single { it.id == staged.id }.conflict })
+        assertEquals("missing", shell("test ! -e '$path/Заметки/Локальный черновик.md' && printf missing"))
     }
 
     private fun createVault() {

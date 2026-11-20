@@ -74,6 +74,12 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
             message.value = "Восстановлено: ${result.restored}. Отличающихся версий оставлено в архиве: ${result.different}."
         }
     }
+    fun migrateVault(uri: Uri) {
+        commands.trySend {
+            val changed = repo.migrateVault(uri)
+            message.value = if (changed == 0) "Файлы GymFlow уже в новом формате" else "Преобразовано файлов: $changed"
+        }
+    }
 
     private fun writeNote(scope: String, id: String, result: (String?) -> Unit, change: (Document?) -> Document) {
         commands.trySend {

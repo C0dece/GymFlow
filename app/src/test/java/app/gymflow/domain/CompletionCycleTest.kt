@@ -117,7 +117,7 @@ class CompletionCycleTest {
 
     @Test fun oldSchemaKeepsItsSchedule() {
         val legacy = program.copy(completionCycle = null)
-        val fromV4 = Markdown.read(Markdown.write(legacy).replace("gymflow_schema: 6", "gymflow_schema: 4"))!!.document as Program
+        val fromV4 = Markdown.read(Markdown.writeLegacy(legacy).replace("gymflow_schema: 6", "gymflow_schema: 4"))!!.document as Program
         assertEquals(legacy, fromV4)
         assertEquals(listOf(days[1]), plannedOn(fromV4, monday.plusDays(2)))
     }

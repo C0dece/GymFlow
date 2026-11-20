@@ -57,6 +57,7 @@ class Repository(private val context: Context, private val journal: Journal, val
     private val lock = Mutex()
     private var scannedVault: Pair<String, String>? = null
     private var duplicateIds = emptySet<String>()
+    private var documentPaths = emptyMap<String, String>()
     private val syncStatus = MutableStateFlow(SyncStatus())
     val status = syncStatus.asStateFlow()
 
@@ -105,16 +106,6 @@ class Repository(private val context: Context, private val journal: Journal, val
         null
     }
     private fun folder(scope: String) = SafFolder(context, scope.toUri())
-    private val locations = listOf("Тренировки", "Программы", "Упражнения", "Участники", "Прогрессия", "Движения", "Заметки")
-    private fun location(doc: Document) = when (doc) {
-        is Session -> locations[0]
-        is Program -> locations[1]
-        is Exercise -> locations[2]
-        is Profile -> locations[3]
-        is ProgressionPolicy, is ProgressionReview -> locations[4]
-        is MovementFamily, is MovementTrack, is MovementSkill, is SkillAttempt -> locations[5]
-        is SportNote -> locations[6]
-    }
 
     private suspend fun <T> exclusive(action: suspend () -> T): T = withContext(Dispatchers.IO) {
         lock.withLock { action() }
@@ -159,16 +150,16 @@ class Repository(private val context: Context, private val journal: Journal, val
     private fun managedNodes(folder: SafFolder): List<Node> {
         val root = folder.children(folder.root)
         val result = root.toMutableList()
-        val queue = ArrayDeque(root.filter { it.folder && it.name in locations })
+        val queue = ArrayDeque(root.filter { it.folder && !it.name.startsWith('.') })
         val visited = hashSetOf(folder.root)
         while (queue.isNotEmpty()) {
             val node = queue.removeFirst()
             if (!visited.add(node.id)) continue
-            val children = folder.children(node.id)
+            val children = folder.children(node.id).map { it.copy(path = "${node.path}/${it.name}") }
             result.addAll(children)
             queue.addAll(children.filter { it.folder && !it.name.startsWith('.') })
         }
-        return result
+        return result.distinctBy { it.id }
     }
 
     private fun migrationFolder(scope: String) = File(context.filesDir, "markdown-backups/" + digest(scope))
@@ -193,7 +184,8 @@ class Repository(private val context: Context, private val journal: Journal, val
     private suspend fun stage(scope: String, document: Document): Boolean {
         val old = records.get(scope, document.id)
         val parsed = old?.let(::parsed)
-        val markdown = Markdown.write(document, parsed?.freeText.orEmpty(), parsed?.extraYaml.orEmpty())
+        val markdown = Markdown.rewrite(document, parsed, extraYaml = linkProperties(document, parsed?.extraYaml.orEmpty(),
+            documentPaths.takeIf { scannedVault?.second == scope }.orEmpty()))
         require(markdown.toByteArray(Charsets.UTF_8).size <= maxDocumentBytes) { "Файл превышает 512 КиБ" }
         if (old?.markdown == markdown) return false
         old?.let { preserveLegacy(scope, document.id, it.markdown) }
@@ -343,7 +335,7 @@ class Repository(private val context: Context, private val journal: Journal, val
     suspend fun maintain() {
         refresh()
         schedule()
-        flush()
+        flushScanned()
     }
 
     private data class External(val node: Node, val markdown: String, val document: Document)
@@ -418,6 +410,7 @@ class Repository(private val context: Context, private val journal: Journal, val
                 }
             }
             duplicateIds = remote.filterValues { it.size > 1 }.keys
+            documentPaths = remote.mapNotNull { (id, entries) -> entries.singleOrNull()?.let { id to it.node.path } }.toMap()
             scannedVault = prefs.folder to scope
         } catch (failure: Exception) {
             if (failure is kotlinx.coroutines.CancellationException) throw failure
@@ -428,7 +421,17 @@ class Repository(private val context: Context, private val journal: Journal, val
         }
     }
 
-    suspend fun flush(ids: Set<String>? = null) = exclusive {
+    suspend fun flush(ids: Set<String>? = null) {
+        val prefs = settings.values.first()
+        if (prefs.folder.isNotBlank() && records.pending(prefs.scope).any {
+                it.source == null && (ids == null || it.id in ids)
+            }) {
+            refresh()
+        }
+        flushScanned(ids)
+    }
+
+    private suspend fun flushScanned(ids: Set<String>? = null) = exclusive {
         val prefs = settings.values.first()
         if (prefs.folder.isBlank() || prefs.vaultId.isBlank()) return@exclusive
         val scope = prefs.scope
@@ -464,19 +467,18 @@ class Repository(private val context: Context, private val journal: Journal, val
         var before: String? = null
         val desired = digest(row.markdown)
         if (source == null) {
-            val name = location(decoded(row))
+            val document = decoded(row)
+            val name = markdownFolder(document)
             val dirs = folder.children(folder.root).filter { it.name == name }
             require(dirs.size <= 1 && dirs.none { !it.folder }) { "Неоднозначная папка $name" }
             val directory = dirs.singleOrNull()?.id ?: folder.create(folder.root, name, folder = true)
-            val fileName = "${row.id}.md"
-            val files = folder.children(directory).filter { it.name == fileName }
-            if (files.isNotEmpty()) {
-                records.put(row.copy(source = files.singleOrNull()?.takeUnless { it.folder }?.id,
-                    conflict = "Имя файла уже занято: $fileName"))
-                return
-            }
+            val context = documentLinks(document).mapNotNull { id -> records.get(row.scope, id)?.let(::decodedOrNull) }
+                .associateBy(Document::id)
+            val fileName = markdownName(document, folder.children(directory).map(Node::name), context)
             source = folder.create(directory, fileName)
             records.put(row.copy(source = source, inFlight = desired))
+            val created = folder.children(directory).singleOrNull { it.id == source }
+            if (created != null) documentPaths = documentPaths + (row.id to "$name/${created.name}")
             before = ""
         }
         val current = folder.read(source)
@@ -530,8 +532,7 @@ class Repository(private val context: Context, private val journal: Journal, val
             val external = raw?.let { runCatching { Markdown.read(it) }.getOrNull() }
             check(external == null || external.document.id == id) { "Файл принадлежит другой записи" }
             val local = requireNotNull(Markdown.read(row.markdown))
-            val text = Markdown.write(local.document, external?.freeText ?: local.freeText,
-                external?.extraYaml ?: local.extraYaml)
+            val text = Markdown.rewrite(local.document, external ?: local)
             require(text.toByteArray(Charsets.UTF_8).size <= maxDocumentBytes) { "Файл превышает 512 КиБ" }
             val next = row.copy(markdown = text, pending = true, localOnly = false,
                 source = source, expected = raw?.let(::digest), backup = raw ?: row.backup, inFlight = null, conflict = null)
@@ -552,6 +553,90 @@ class Repository(private val context: Context, private val journal: Journal, val
         records.put(row.copy(localOnly = true, conflict = null))
     }
 
+    suspend fun migrateVault(archive: Uri): Int {
+        refresh()
+        try {
+            return exclusive {
+                val prefs = settings.values.first()
+                val scope = prefs.scope
+                check(prefs.folder.isNotBlank() && scannedVault == (prefs.folder to scope)) { "Папка GymFlow недоступна" }
+                check(duplicateIds.isEmpty() && syncStatus.value.issues.isEmpty()) { "Сначала устраните ошибки чтения и повторяющиеся ID" }
+                val folder = verifiedFolder(prefs)
+                val nodes = managedNodes(folder)
+                val bySource = nodes.associateBy(Node::id)
+                val names = nodes.groupBy(Node::parent).mapValues { (_, files) -> files.map(Node::name).toMutableList() }
+                val rows = records.all(scope).filterNot(Record::localOnly).sortedBy(Record::id)
+                check(rows.none { it.conflict != null || it.pending || it.source == null }) {
+                    "Сначала завершите синхронизацию и разрешите конфликты"
+                }
+                val documents = rows.associate { it.id to decoded(it) }
+                val targets = rows.map { row ->
+                    val node = requireNotNull(bySource[row.source]) { "Файл перемещён. Обновите библиотеку." }
+                    val next = if (node.name.equals("${row.id}.md", ignoreCase = true)) {
+                        val occupied = names.getValue(node.parent)
+                        markdownName(documents.getValue(row.id), occupied, documents).also(occupied::add)
+                    } else node.name
+                    Triple(row, node, next)
+                }
+                val paths = targets.associate { (row, node, name) ->
+                    val parent = node.path.substringBeforeLast('/', "")
+                    row.id to if (parent.isEmpty()) name else "$parent/$name"
+                }
+                val movedLinks = buildMap {
+                    targets.filter { (_, node, name) -> node.name != name }.forEach { (row, node, _) ->
+                        val destination = paths.getValue(row.id).dropLast(3)
+                        put(node.path.dropLast(3), destination)
+                        put(row.id, destination)
+                    }
+                }
+                val changes = targets.mapNotNull { (row, node, name) ->
+                    val raw = folder.read(node.id)
+                    check(digest(raw) == row.expected) { "Файл изменился. Повторите синхронизацию." }
+                    val parsed = parsed(row)
+                    fun rewriteLinks(text: String) = migrateWikiLinks(text, movedLinks)
+                    val next = when (val doc = parsed.document) {
+                        is SportNote -> doc.copy(body = rewriteLinks(doc.body))
+                        is Session -> doc.copy(workoutNotes = doc.workoutNotes.map { it.copy(body = rewriteLinks(it.body)) })
+                        else -> doc
+                    }
+                    val preserved = parsed.copy(freeText = rewriteLinks(parsed.freeText),
+                        legacyText = parsed.legacyText?.let(::rewriteLinks))
+                    val after = Markdown.rewrite(next, preserved, extraYaml = linkProperties(next, parsed.extraYaml, paths))
+                    require(after.toByteArray(Charsets.UTF_8).size <= maxDocumentBytes) { "Файл превышает 512 КиБ" }
+                    check(Markdown.read(after)?.document == next) { "Не совпали данные после преобразования" }
+                    if (after == raw && name == node.name) null else VaultChange(row, node, name, raw, after)
+                }
+                if (changes.isEmpty()) return@exclusive 0
+                val resolver = context.contentResolver
+                val out = resolver.openOutputStream(archive, "wt") ?: throw IOException("Архив недоступен")
+                val expected = out.use { migrationBackup(it, changes) }
+                val input = resolver.openInputStream(archive) ?: throw IOException("Не удалось прочитать созданный архив")
+                verifyMigrationBackup(input, expected)
+                changes.forEach { change ->
+                    val (row, node, name, raw, after) = change
+                    check(folder.read(node.id) == raw) { "Файл изменился во время миграции" }
+                    if (after != raw) {
+                        val pending = row.copy(markdown = after, pending = true)
+                        records.put(pending)
+                        flushRow(folder, pending)
+                        check(records.get(scope, row.id)?.pending == false) { "Запись не подтверждена. Исходники в архиве." }
+                    }
+                    if (name != node.name) {
+                        check(folder.children(node.parent).none { it.name.equals(name, ignoreCase = true) }) { "Имя уже занято: $name" }
+                        check(folder.read(node.id) == after) { "Файл изменился во время миграции" }
+                        val renamed = folder.rename(node.id, name)
+                        check(folder.children(node.parent).any { it.id == renamed && it.name == name } &&
+                            folder.read(renamed) == after) { "Провайдер не подтвердил новое имя файла" }
+                        records.get(scope, row.id)?.let { records.put(it.copy(source = renamed)) }
+                    }
+                }
+                changes.size
+            }
+        } finally {
+            refresh()
+        }
+    }
+
     suspend fun export(uri: Uri, backups: Boolean) = exclusive {
         val prefs = settings.values.first()
         val scope = prefs.scope
@@ -560,7 +645,7 @@ class Repository(private val context: Context, private val journal: Journal, val
         ZipOutputStream(stream).use { zip ->
             if (backups && prefs.vaultId.isNotBlank()) {
                 zip.putNextEntry(ZipEntry(vaultMarker))
-                zip.write("${prefs.vaultId}\n".toByteArray(Charsets.UTF_8))
+                zip.write(vaultMetadata(prefs.vaultId).toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
             }
             if (backups) listOf(scope, prefs.folder).distinct().flatMap { migrationFolder(it).listFiles().orEmpty().toList() }
@@ -569,9 +654,15 @@ class Repository(private val context: Context, private val journal: Journal, val
                 file.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
             }
-            rows.forEach { row ->
+            val docs = rows.mapNotNull(::decodedOrNull).associateBy(Document::id)
+            val occupied = mutableMapOf<String, MutableList<String>>()
+            rows.sortedBy(Record::id).forEach { row ->
                 val document = decodedOrNull(row)
-                val path = if (document == null) "Нечитаемые/${digest(row.id)}.md" else location(document) + "/" + row.id + ".md"
+                val path = if (document == null) "Нечитаемые/${digest(row.id)}.md" else {
+                    val section = markdownFolder(document)
+                    val names = occupied.getOrPut(section) { mutableListOf() }
+                    "$section/${markdownName(document, names, docs).also(names::add)}"
+                }
                 zip.putNextEntry(ZipEntry(path))
                 zip.write(row.markdown.toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
@@ -606,10 +697,10 @@ class Repository(private val context: Context, private val journal: Journal, val
                             bytes += raw.toByteArray(Charsets.UTF_8).size
                             require(bytes <= 256L * 1024 * 1024) { "Архив слишком большой" }
                             val path = entry.name.split('/')
-                            if (path.size == 2 && path[0] in locations && path[1].endsWith(".md")) {
+                            if (path.size == 2 && path[0] in markdownFolders && path[1].endsWith(".md", true)) {
                                 val document = requireNotNull(Markdown.read(raw)) { "В архиве есть нечитаемый документ" }.document
                                 val id = document.id
-                                require(path[1] == "$id.md" && ids.add(id)) { "Имя файла или ID в архиве некорректны" }
+                                require(ids.add(id)) { "В архиве повторяется ID записи" }
                                 val existing = records.get(prefs.scope, id)
                                 when {
                                     existing == null -> {

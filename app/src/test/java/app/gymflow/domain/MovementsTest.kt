@@ -106,7 +106,7 @@ class MovementsTest {
 
     @Test fun schemaThreeRecordsUseClassicDefaults() {
         val source = session(player).addExercise(ExercisePlan(Exercise(name = "Классика"), sets))
-        val old = Markdown.write(source).replace("gymflow_schema: 6", "gymflow_schema: 3")
+        val old = Markdown.writeLegacy(source).replace("gymflow_schema: 6", "gymflow_schema: 3")
         assertEquals(source, Markdown.read(old)?.document)
         assertEquals(WorkoutVolume.NORMAL, source.workout(player.id)!!.volume)
         assertEquals(SetRole.WARMUP, SetPlan(warmup = true).purpose)

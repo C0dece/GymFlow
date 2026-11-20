@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { convert, markdown } from './import-obsidian.mjs';
+import { convert, filenameFor, markdown } from './import-obsidian.mjs';
 
 function fixture(week, plan, first, second) {
     const days = [
@@ -41,4 +41,11 @@ test('W44 becomes independent planned weights and W43 preserves only recorded va
 test('a plan file cannot be substituted for completed history', () => {
     const w44 = fixture(2, '2×10', 'Ал: 12×<br>П: 10×', 'Ал: ×<br>П: ×');
     assert.throws(() => convert(w44, w44));
+});
+
+test('names stay readable and avoid a case-insensitive collision', () => {
+    const source = { kind: 'session', date: '2026-11-20', title: 'Грудь / Трицепс' };
+    const occupied = new Set(['2026-11-20 - грудь трицепс.md']);
+    assert.equal(filenameFor(source, occupied), '2026-11-20 - Грудь Трицепс (2).md');
+    assert.equal(filenameFor({ kind: 'exercise', name: '3a34c38c-c680-4020-a78b-01df63bc2ba8' }), 'Упражнение.md');
 });

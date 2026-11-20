@@ -6,7 +6,7 @@ import org.junit.Test
 class ProfileColorTest {
     @Test fun markdownNormalizesValidLegacyColorsAndUsesDefaultForDamage() {
         val profile = Profile(name = "QA")
-        val src = Markdown.write(profile)
+        val src = Markdown.writeLegacy(profile)
         val normalized = 0xFFCF91EA.toInt()
         val cases = listOf(
             "#CF91EA" to normalized, "#7FCF91EA" to normalized, "0xFFCF91EA" to normalized,
@@ -18,7 +18,7 @@ class ProfileColorTest {
             assertEquals(expected, read.color)
             assertEquals(read, Markdown.read(Markdown.write(read))?.document)
         }
-        val legacyNegative = Markdown.write(profile.copy(color = normalized))
+        val legacyNegative = Markdown.writeLegacy(profile.copy(color = normalized))
             .replace("gymflow_schema: 6", "gymflow_schema: 2")
             .replace("\"color\": $normalized", "\"color\": \\u002d${-normalized}")
         assertEquals(normalized, (Markdown.read(legacyNegative)?.document as Profile).color)

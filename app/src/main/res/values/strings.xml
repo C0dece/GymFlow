@@ -164,7 +164,7 @@
     <string name="skip_exercise">Пропустить упражнение</string>
     <string name="sun">Вс</string>
     <string name="switch_folder">Сменить папку</string>
-    <string name="switch_folder_help">После переноса или переименования выберите ту же папку с файлом gymflow-vault.md. GymFlow продолжит работу с её локальной копией и очередью.</string>
+    <string name="switch_folder_help">После переноса или переименования выберите ту же папку с её файлом хранилища. GymFlow продолжит работу с локальной копией и очередью.</string>
     <string name="system_theme">Системная</string>
     <string name="theme">Тема</string>
     <string name="thu">Чт</string>
