@@ -22,7 +22,7 @@ import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 import kotlinx.coroutines.launch
 
-private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, EDIT_METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE, NOTES }
+private enum class Sheet { ADD, REPLACE, PERSON, SET, METRICS, EDIT_METRICS, FINISH, FINISH_PERSON, ASSIGN, DAY, VOLUME, VARIATION, ADVICE, GUIDANCE, NOTES, DISCARD }
 
 @Composable
 fun Workout(
@@ -202,7 +202,7 @@ private fun ColumnScope.ParticipantScreen(
                         }
                     }
                     Action(stringResource(R.string.workout_details)) { open(Sheet.METRICS) }
-                    if (chosen.templateNotes.isNotBlank() || chosen.trainingBlocks.any { it.enabled && it.guidance.isNotBlank() }) {
+                    if (chosen.templateNotes.isNotBlank() || chosen.trainingBlocks.any { it.enabled && it.hasGuidance }) {
                         Action("Указания к тренировке") { open(Sheet.GUIDANCE) }
                     }
                     if (editable) Action("Объём тренировки", "training_volume") { open(Sheet.VOLUME) }
@@ -223,9 +223,12 @@ private fun ColumnScope.ParticipantScreen(
                         }
                     }
                     Action(stringResource(R.string.finish_group), "finish_group") { open(Sheet.FINISH) }
+                    Action("Отменить тренировку", "cancel_workout") { open(Sheet.DISCARD) }
                 }
             } else {
-                IconButton(onClick = { menu = true }) { Symbol(R.drawable.ic_more, description = stringResource(R.string.workout_actions)) }
+                IconButton(onClick = { menu = true }, modifier = Modifier.testTag("workout_menu")) {
+                    Symbol(R.drawable.ic_more, description = stringResource(R.string.workout_actions))
+                }
                 DropdownMenu(menu, { menu = false }) {
                     Action("Заметки к тренировке", "workout_notes") { open(Sheet.NOTES) }
                     if (program != null && program.days.isNotEmpty()) {
@@ -237,6 +240,9 @@ private fun ColumnScope.ParticipantScreen(
                     if (!reviewing && session.status == SessionStatus.COMPLETED) Action(stringResource(R.string.repeat_workout), "repeat_workout") {
                         menu = false
                         repeat()
+                    }
+                    if (session.status == SessionStatus.COMPLETED) {
+                        Action("Удалить тренировку", "delete_workout") { open(Sheet.DISCARD) }
                     }
                 }
             }
@@ -272,8 +278,17 @@ private fun ColumnScope.ParticipantScreen(
         if (current == null) {
             ScreenColumn {
                 if (!editable) context(null, page)
-                Text(stringResource(R.string.empty_workout), style = MaterialTheme.typography.headlineLarge)
-                Muted(stringResource(R.string.empty_workout_body))
+                val guidanceBlocks = chosen.trainingBlocks.filter { it.enabled && it.hasGuidance }
+                if (guidanceBlocks.isEmpty()) {
+                    Text(stringResource(R.string.empty_workout), style = MaterialTheme.typography.headlineLarge)
+                    Muted(stringResource(R.string.empty_workout_body))
+                } else guidanceBlocks.forEach { item ->
+                    CardBlock {
+                        SectionTitle(item.name)
+                        item.durationSeconds?.let { Muted(durationText(it)) }
+                        if (item.guidance.isNotBlank()) Text(item.guidance)
+                    }
+                }
                 if (editable) {
                     Button(onClick = { open(Sheet.ADD) }, modifier = Modifier.fillMaxWidth().testTag("add_exercise")) {
                         Symbol(R.drawable.ic_add)
@@ -326,7 +341,8 @@ private fun ColumnScope.ParticipantScreen(
                     }
                 },
                 toggle = { set ->
-                    if (set.status != SetStatus.COMPLETED && (!set.proposed.weightKnown || !set.proposed.repsKnown || !current.exercise.movement?.measures.isNullOrEmpty() || current.exercise.cardio != null)) {
+                    if (set.status != SetStatus.COMPLETED && (set.plan.durationSeconds != null || !set.proposed.weightKnown ||
+                            !set.proposed.repsKnown || !current.exercise.movement?.measures.isNullOrEmpty() || current.exercise.cardio != null)) {
                         editing = set.id
                         open(Sheet.SET)
                     } else record(current.id, set.toggle(), rotate = true, expected = set)
@@ -466,10 +482,11 @@ private fun ColumnScope.ParticipantScreen(
         }
         Sheet.GUIDANCE -> EditorSheet("Указания к тренировке", close) {
             if (chosen.templateNotes.isNotBlank()) Text(chosen.templateNotes)
-            chosen.trainingBlocks.filter { it.enabled && it.guidance.isNotBlank() }.forEach { block ->
+            chosen.trainingBlocks.filter { it.enabled && it.hasGuidance }.forEach { block ->
                 SectionTitle(block.name)
                 Muted(block.requirement.label)
-                Text(block.guidance)
+                block.durationSeconds?.let { Muted(durationText(it)) }
+                if (block.guidance.isNotBlank()) Text(block.guidance)
             }
         }
         Sheet.EDIT_METRICS -> if (canCorrect) {
@@ -521,6 +538,18 @@ private fun ColumnScope.ParticipantScreen(
             confirmButton = { Button(onClick = { model.session(session.id, onSaved = { close(); leave() }) { it.finish() } },
                 modifier = Modifier.testTag("confirm_finish")) { Text(stringResource(R.string.finish)) } },
             dismissButton = { TextButton(onClick = close) { Text(stringResource(R.string.cancel)) } },
+        )
+        Sheet.DISCARD -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text(if (active) "Отменить тренировку?" else "Удалить тренировку?") },
+            text = { Text(if (active) "Текущий результат не попадёт в историю. Сохранённый план и заметки останутся."
+                else "Тренировка исчезнет из истории и перестанет учитываться в прогрессии. Запись останется в Markdown для восстановления.") },
+            confirmButton = {
+                TextButton(onClick = { model.closeSession(library.scope, session, active) { close(); leave() } },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.testTag("confirm_discard_workout")) { Text(if (active) "Да, отменить" else "Удалить") }
+            },
+            dismissButton = { TextButton(onClick = close) { Text("Оставить тренировку") } },
         )
         null -> Unit
     }

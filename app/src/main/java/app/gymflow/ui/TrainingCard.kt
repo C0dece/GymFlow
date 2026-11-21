@@ -44,7 +44,7 @@ fun ExerciseCard(
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(exercise.name, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("exercise_title"))
-                Muted(exercise.cardio?.label ?: "${loadText(exercise.load)} · ${unitText(exercise.unit)}")
+                Muted(exercise.cardio?.label ?: if (exercise.tracksDuration) "На время" else "${loadText(exercise.load)} · ${unitText(exercise.unit)}")
             }
             if (editable) actions()
         }
@@ -73,7 +73,8 @@ fun ExerciseCard(
                 SetRow(set, label, exercise, isActive, set.id == focusSet && set.status == SetStatus.PLANNED,
                     index, profile.compact, { edit(set) }, { toggle(set) }, correcting)
             }
-            if (!athlete.skipped && (editable || correcting || athlete.rir != null)) {
+            if (!athlete.skipped && (athlete.rir != null || !exercise.tracksDuration && athlete.sets.none { it.plan.durationSeconds != null } &&
+                    (editable || correcting))) {
                 CardBlock {
                     Text(stringResource(R.string.rir), style = MaterialTheme.typography.titleMedium)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -126,7 +127,8 @@ private fun SetRow(set: SetEntry, label: String, exercise: Exercise, enabled: Bo
 fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -> Unit,
     newResult: Boolean = false, history: Boolean = false,
     orderActions: @Composable () -> Unit = {}, save: (SetEntry) -> Unit) {
-    val initializingTimed = set.actual == null && exercise.tracksDuration
+    val timed = exercise.tracksDuration || set.plan.durationSeconds != null
+    val initializingTimed = set.actual == null && timed
     var weight by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.weightKnown) number(set.proposed.weight) else "") }
     var reps by rememberSaveable { mutableStateOf(if (!initializingTimed && set.proposed.repsKnown) set.proposed.reps.toString() else "") }
     var note by rememberSaveable { mutableStateOf(set.proposed.note) }
@@ -140,35 +142,39 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
     val canPlan = !newResult && !history && set.status == SetStatus.PLANNED
     var technique by rememberSaveable { mutableStateOf(set.actual?.technique) }
     val kinds = (exercise.movement?.measures.orEmpty() + set.proposed.measurements.keys +
-        if (exercise.cardio != null) cardioMeasures else emptySet()).sortedBy { it.ordinal }
+        when {
+            exercise.cardio != null -> cardioMeasures
+            timed && exercise.movement?.measures.orEmpty().none { it in setOf(Measure.HOLD, Measure.BALANCE) } -> setOf(Measure.DURATION)
+            else -> emptySet()
+        }).sortedBy { it.ordinal }
     val observed = remember(set.id) { mutableStateMapOf<Measure, String>().apply {
         set.proposed.measurements.forEach { (kind, value) -> put(kind, number(value)) }
     } }
     val measurements = observed.filterValues { it.isNotBlank() }.mapValues { it.value.trim().replace(',', '.').toDoubleOrNull() }
     val measured = measurements.mapNotNull { (kind, value) -> value?.takeIf(kind::accepts)?.let { kind to it } }.toMap()
     val valid = measurements.size == measured.size && (weight.isBlank() || amount != null) &&
-        (reps.isBlank() || repCount != null) && (measured.isNotEmpty() || exercise.cardio == null && amount != null && repCount != null)
+        (reps.isBlank() || repCount != null) && (measured.isNotEmpty() || !timed && amount != null && repCount != null)
     EditorSheet(stringResource(R.string.edit_set), close) {
-        Muted(exercise.cardio?.label ?: loadText(exercise.load))
+        Muted(exercise.cardio?.label ?: if (timed) "На время" else loadText(exercise.load))
         if (canPlan) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(!planning, { planning = false }, label = { Text("Результат") })
             FilterChip(planning, { planning = true }, modifier = Modifier.testTag("set_plan_tab"), label = { Text("План") })
         }
         if (planning && canPlan) {
-            PlanSetFields(planDraft, exercise.unit, "set_plan") { planDrafts = listOf(it) }
-            val plan = planDraft.result()
+            PlanSetFields(planDraft, exercise, "set_plan") { planDrafts = listOf(it) }
+            val plan = planDraft.result(timed)
             Button(onClick = { plan?.let { save(set.copy(plan = it, deferred = false)) } },
                 enabled = plan != null, modifier = Modifier.fillMaxWidth().testTag("save_active_set_plan")) { Text("Сохранить план подхода") }
             TextButton(onClick = close) { Text(stringResource(R.string.cancel)) }
             return@EditorSheet
         }
         if (!canPlan) Muted("План · " + plannedSetText(set.plan, exercise))
-        if (exercise.cardio == null) StepField(weight, stringResource(R.string.weight_unit, unitText(exercise.unit)), { weight = it }, "set_weight", KeyboardType.Decimal) { step ->
+        if (!timed) StepField(weight, stringResource(R.string.weight_unit, unitText(exercise.unit)), { weight = it }, "set_weight", KeyboardType.Decimal) { step ->
             val delta = prefs.step * if (prefs.unit == exercise.unit) 1.0 else prefs.unit.toKg / exercise.unit.toKg
             val value = ((amount ?: 0.0) + delta * step).coerceAtLeast(0.0)
             if (value.isFinite()) weight = number(value.toBigDecimal().setScale(3, java.math.RoundingMode.HALF_UP).toDouble())
         }
-        if (exercise.cardio == null) StepField(reps, stringResource(R.string.reps), { reps = it }, "set_reps", KeyboardType.Number) { step ->
+        if (!timed) StepField(reps, stringResource(R.string.reps), { reps = it }, "set_reps", KeyboardType.Number) { step ->
             reps = ((repCount ?: 1).toLong() + step).coerceIn(1, Int.MAX_VALUE.toLong()).toString()
         }
         kinds.forEach { kind ->
@@ -184,7 +190,7 @@ fun SetEditor(set: SetEntry, exercise: Exercise, prefs: Preferences, close: () -
                 { planDrafts = listOf(planDraft.copy(role = it)) }, "set_role")
         }
         Button(onClick = {
-            if (valid) save(set.copy(plan = if (newResult) planDraft.result() ?: set.plan else set.plan, actual = Actual(amount ?: 0.0, repCount ?: 1, note.trim(),
+            if (valid) save(set.copy(plan = if (newResult) planDraft.result(timed) ?: set.plan else set.plan, actual = Actual(amount ?: 0.0, repCount ?: 1, note.trim(),
                 weightKnown = amount != null, repsKnown = repCount != null, measurements = measured, technique = technique),
                 status = SetStatus.COMPLETED, deferred = false))
         }, enabled = valid, modifier = Modifier.fillMaxWidth().testTag("save_set")) {

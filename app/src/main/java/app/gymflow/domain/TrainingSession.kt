@@ -9,6 +9,19 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
+data class PlannedSessionState(
+    val title: String,
+    val date: String,
+    val workouts: List<ParticipantWorkout>,
+    val switchedProfileId: String? = null,
+    val progression: List<ProgressionReceipt> = emptyList(),
+    val scheduledFor: String? = null,
+    val otherWorkouts: List<ParticipantWorkout> = emptyList(),
+    val programId: String? = null,
+    val programDayId: String? = null,
+)
+
+@Serializable
 data class ParticipantWorkout(
     val id: String = newId(),
     val profile: Profile,
@@ -33,6 +46,7 @@ data class ParticipantWorkout(
         if (athlete.skipped) 0 else athlete.sets.count { it.status == SetStatus.PLANNED }
     }
     val completed: Int get() = exercises.sumOf { it.counts.first }
+    internal val guidanceOnly get() = exercises.isEmpty() && trainingBlocks.any { it.enabled && it.hasGuidance }
     val canEdit: Boolean get() = status == WorkoutStatus.ACTIVE
 
     fun withTemplate(template: WorkoutTemplate?) = copy(
@@ -126,6 +140,8 @@ data class TrainingSession(
     val switchedProfileId: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val scheduledFor: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val workoutNotes: List<WorkoutNote> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val beforeStart: PlannedSessionState? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val discarded: Boolean = false,
 ) : Document {
     constructor(title: String, date: String, participants: List<Profile>) : this(
         title = title, date = date, workouts = participants.map { ParticipantWorkout(profile = it) },
@@ -136,7 +152,7 @@ data class TrainingSession(
     fun workout(profileId: String?) = workouts.firstOrNull { it.profile.id == profileId }
     val defaultWorkout get() = workout(switchedProfileId) ?: workouts.firstOrNull { it.canEdit } ?: workouts.first()
     fun completedWorkouts(profileId: String) = (workouts + otherWorkouts.asReversed()).filter {
-        it.profile.id == profileId && (it.status == WorkoutStatus.COMPLETED ||
+        !discarded && it.profile.id == profileId && (it.status == WorkoutStatus.COMPLETED ||
             (status == SessionStatus.COMPLETED && it in workouts))
     }
 
@@ -173,17 +189,29 @@ data class TrainingSession(
             workout.editExercise(exerciseId) { it.copy(athletes = listOf(change(it.athletes.single()))) }
         }
 
-    fun start(now: Instant = Instant.now()): TrainingSession = if (status == SessionStatus.PLANNED) {
-        copy(status = SessionStatus.ACTIVE, started = now.toString(), workouts = workouts.map {
+    fun start(now: Instant = Instant.now(), previous: Session? = null): TrainingSession = if (status == SessionStatus.PLANNED) {
+        copy(status = SessionStatus.ACTIVE, started = now.toString(), beforeStart = previous?.let {
+            PlannedSessionState(it.title, it.date, it.workouts, it.switchedProfileId, it.progression, it.scheduledFor,
+                it.otherWorkouts, it.programId, it.programDayId)
+        }, workouts = workouts.map {
             if (it.status == WorkoutStatus.PLANNED) it.copy(status = WorkoutStatus.ACTIVE) else it
         })
     } else this
 
+    fun cancelStart(): Session {
+        require(status == SessionStatus.ACTIVE && !discarded)
+        val previous = beforeStart ?: return copy(discarded = true)
+        return copy(status = SessionStatus.PLANNED, title = previous.title, date = previous.date, workouts = previous.workouts,
+            switchedProfileId = previous.switchedProfileId, progression = previous.progression,
+            scheduledFor = previous.scheduledFor, started = null, finished = null, beforeStart = null,
+            otherWorkouts = previous.otherWorkouts, programId = previous.programId, programDayId = previous.programDayId)
+    }
+
     fun finish(now: Instant = Instant.now()) = copy(
-        status = SessionStatus.COMPLETED, finished = now.toString(), workouts = workouts.map {
+        status = SessionStatus.COMPLETED, finished = now.toString(), beforeStart = null, workouts = workouts.map {
             when (it.status) {
                 WorkoutStatus.PLANNED, WorkoutStatus.ACTIVE, WorkoutStatus.PAUSED -> it.copy(
-                    status = if (it.completed > 0 && (it.cycleSlot != null || it.exercises.none { entry ->
+                    status = if (it.guidanceOnly || it.completed > 0 && (it.cycleSlot != null || it.exercises.none { entry ->
                         entry.plan.block == PlanBlock.REQUIRED && !entry.athletes.single().skipped &&
                             entry.athletes.single().sets.any { set -> set.status == SetStatus.PLANNED }
                     })) WorkoutStatus.COMPLETED else WorkoutStatus.CANCELLED,

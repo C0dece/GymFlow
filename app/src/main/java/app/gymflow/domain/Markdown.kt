@@ -387,6 +387,7 @@ object Markdown : DocumentCodec {
     private fun validateSet(plan: SetPlan) {
         require(plan.weight.isFinite() && plan.weight >= 0 && plan.repsMin in 1..plan.repsMax)
         require(plan.targetReps == null || plan.targetReps in plan.repsMin..plan.repsMax)
+        require(plan.durationSeconds == null || Measure.DURATION.accepts(plan.durationSeconds))
     }
 
     private fun validateEntry(entry: ExerciseEntry, participants: Set<String>) {
@@ -424,7 +425,9 @@ object Markdown : DocumentCodec {
     }
     private fun number(value: Double) = value.toString().removeSuffix(".0")
     private fun reps(min: Int, max: Int) = if (min == max) "$max" else "$min-$max"
-    private fun planText(p: SetPlan) = "${if (p.weightKnown) number(p.weight) else "?"} × " +
+    private fun planText(p: SetPlan, exercise: Exercise) = if (exercise.tracksDuration || p.durationSeconds != null) {
+        p.durationSeconds?.let { "${number(it)} с" } ?: "Время не задано"
+    } else "${if (p.weightKnown) number(p.weight) else "?"} × " +
         when {
             p.maxEffort -> "макс"
             !p.repsKnown -> "?"
@@ -467,11 +470,12 @@ object Markdown : DocumentCodec {
                 appendLine()
                 appendLine("## ${md(day.title)}${if (document.cycle) "" else " ($weekday)"}")
                 day.blocks.forEach { block ->
-                    appendLine("- ${md(block.name)}: ${block.requirement.label}. ${md(block.guidance)}")
+                    val time = block.durationSeconds?.let { " ${number(it)} с." }.orEmpty()
+                    appendLine("- ${md(block.name)}: ${block.requirement.label}.$time ${md(block.guidance)}")
                 }
                 day.exercises.forEach { plan ->
                     val details = plan.restLabel()?.let { ". Отдых $it" }.orEmpty()
-                    appendLine("- ${md(plan.exercise.name)}: ${plan.sets.joinToString(transform = ::planText)}$details")
+                    appendLine("- ${md(plan.exercise.name)}: ${plan.sets.joinToString { planText(it, plan.exercise) }}$details")
                 }
             }
         }.trimEnd()
@@ -495,7 +499,7 @@ object Markdown : DocumentCodec {
             workout.exercises.forEach { entry ->
                 appendLine()
                 appendLine("### ${md(entry.exercise.name)}")
-                appendLine("${load(entry.exercise)} · ${unit(entry.exercise.unit)}")
+                if (!entry.exercise.tracksDuration) appendLine("${load(entry.exercise)} · ${unit(entry.exercise.unit)}")
                 (listOf(entry) + entry.replaced).forEach { record ->
                     if (record !== entry) appendLine("#### Заменено: ${md(record.exercise.name)}")
                     val athlete = record.athletes.single()
@@ -519,7 +523,7 @@ object Markdown : DocumentCodec {
                             SetStatus.SKIPPED -> "Пропущен"
                             SetStatus.CANCELLED -> "Отменён"
                         }
-                        appendLine("| $label | ${planText(set.plan)} | $result | $status | ${md(actual?.note.orEmpty())} |")
+                        appendLine("| $label | ${planText(set.plan, record.exercise)} | $result | $status | ${md(actual?.note.orEmpty())} |")
                     }
                 }
             }

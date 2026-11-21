@@ -70,6 +70,11 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
                 }
                 if (path != null) TextButton(onClick = model::refresh) { Text(stringResource(R.string.refresh)) }
             }
+            if (conflicts.isNotEmpty()) {
+                HorizontalDivider()
+                SectionTitle("Синхронизация файлов")
+                if (conflicts.any { it.conflict != null }) Muted("Проверьте записи, которые требуют вашего решения.")
+            }
             conflicts.forEach { row ->
                 val name = when (val doc = docs[row.id]) {
                     is Session -> doc.title
@@ -85,7 +90,14 @@ fun PreferencesPage(library: Library, prefs: Preferences, status: SyncStatus, mo
                     is SportNote -> doc.title
                     null -> row.id
                 }
-                HorizontalDivider()
+                val kind = when (docs[row.id]) {
+                    is Program -> "Программа"
+                    is Session -> "Тренировка"
+                    is Exercise -> "Упражнение"
+                    is SportNote -> "Заметка"
+                    else -> "Запись"
+                }
+                Muted(kind)
                 Text(name, style = MaterialTheme.typography.titleMedium)
                 Muted(if (row.localOnly) "Хранится на устройстве" else row.conflict.orEmpty())
                 if (row.localOnly) TextButton(onClick = { model.resolve(row.id, true) }) { Text("Выгрузить в папку") }

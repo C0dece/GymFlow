@@ -41,6 +41,27 @@ class ProgramImportTest {
         return reviewImport(input, draft, raw, programs, catalog, choices)
     }
 
+    @Test fun importsTimedSetsAndWarmupWithoutInventingWeightOrRepetitions() {
+        val raw = source(listOf("Занятие"), 1).substringBefore("### [MAIN") + """
+            ### [WARMUP REQUIRED] Подготовка
+            Время: 5 мин
+            Лёгкие движения
+            ### [CARDIO OPTIONAL] Выносливость
+            | Упражнение | Длительность | Отдых |
+            | --- | --- | --- |
+            | Ходьба QA | 2 × 1,5 мин | 30 с |
+        """.trimIndent()
+        val existing = Exercise(name = "Ходьба QA")
+        val imported = apply(raw, catalog = listOf(existing)).program.days.single()
+        assertEquals(300.0, imported.blocks.first().durationSeconds!!, 0.0)
+        assertEquals("Лёгкие движения", imported.blocks.first().guidance)
+        val plan = imported.exercises.single()
+        assertEquals(existing.id, plan.exercise.id)
+        assertEquals(CardioType.OTHER, plan.exercise.cardio)
+        assertEquals(listOf(90.0, 90.0), plan.sets.map(SetPlan::durationSeconds))
+        assertTrue(plan.sets.none { it.weightKnown || it.repsKnown })
+    }
+
     @Test fun calendarAndDifferentRotationSizesUseExistingScheduler() {
         val calendar = apply(source(listOf("Тяга", "Корпус"), 2, calendar = true)).program
         assertEquals(listOf(DayOfWeek.MONDAY, DayOfWeek.THURSDAY), calendar.days.map { it.weekday })

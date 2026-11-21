@@ -21,6 +21,7 @@ internal object ProgramImport {
     private val range = Regex("""([0-9]{1,7})(?:\s*[-\u2013\u2014]\s*([0-9]{1,7}))?""")
     private val sets = Regex("""([0-9]{1,3})\s*[×xXхХ]\s*(.+)""")
     private val rest = Regex("""(.+?)\s*(с|сек|мин|s|min)\.?""", RegexOption.IGNORE_CASE)
+    private val duration = Regex("""([0-9]+(?:[.,][0-9]+)?)\s*(с|сек|мин|s|min)\.?""", RegexOption.IGNORE_CASE)
     private val separator = Regex("""^:?-{3,}:?$""")
     private val listFields = setOf("rotation", "weekdays", "visit_days", "tags")
     private val fieldsAllowed = listFields + setOf(
@@ -195,14 +196,19 @@ internal object ProgramImport {
                         val block = active ?: blocks.firstOrNull { it.type == type }
                             ?: TrainingBlock(stableId("$id/${type.name}"), type, type.label, requirement(type)).also(blocks::add)
                         val at = blocks.indexOfFirst { it.id == block.id }
-                        blocks[at] = blocks[at].copy(guidance = listOf(blocks[at].guidance, plain(line.removePrefix("- ")))
-                            .filter(String::isNotBlank).joinToString("\n"))
+                        val text = plain(line.removePrefix("- "))
+                        val seconds = text.takeIf { key(it.substringBefore(':')) == "время" }
+                            ?.substringAfter(':')?.trim()?.let(::durationValue)
+                        blocks[at] = if (seconds != null) blocks[at].copy(durationSeconds = seconds)
+                        else blocks[at].copy(guidance = listOf(blocks[at].guidance, text).filter(String::isNotBlank).joinToString("\n"))
                     } else notes.add(line)
                     index++
                 }
             }
         }
-        require(plans.isNotEmpty()) { "В «${section.title}» нужна непустая таблица упражнений." }
+        require(plans.isNotEmpty() || blocks.any { it.hasGuidance }) {
+            "В «${section.title}» добавьте упражнения или указания к блоку."
+        }
         require(plans.groupBy { it.blockId }.values.all { entries -> entries.map { it.exercise.id }.distinct().size == entries.size }) {
             "Повтор упражнения в одном блоке «${section.title}». Разделите назначения на блоки."
         }
@@ -210,16 +216,20 @@ internal object ProgramImport {
     }
 
     private fun readExercises(lines: List<String>, block: TrainingBlock, title: String): List<ExercisePlan> {
-        require(cells(lines.first(), title).map(::key) in listOf(
+        val header = cells(lines.first(), title).map(::key)
+        val timeColumn = header == listOf("упражнение", "длительность", "отдых")
+        require(timeColumn || header in listOf(
             listOf("упражнение", "рабочие подходы × повторы", "отдых"),
             listOf("упражнение", "подходы × повторы", "отдых"),
-        )) { "У «$title» ожидаются столбцы «Упражнение», «Подходы × повторы», «Отдых»." }
+        )) { "У «$title» ожидаются столбцы «Упражнение», «Подходы × повторы» или «Длительность», «Отдых»." }
         return rows(lines, 3, title).map { (nameRaw, prescription, restText) ->
             val name = plain(nameRaw)
-            val (countText, repsText) = (sets.matchEntire(plain(prescription))
-                ?: error("У «$name» в «$title» укажите подходы × повторы.")).destructured
-            val reps = interval(repsText, 9999, "повторы у $name")
-            val count = positive(countText, 100, "подходы у $name")
+            val target = plain(prescription)
+            val counts = sets.matchEntire(target)?.groupValues
+            val time = durationValue(counts?.get(2) ?: target)
+            require(time != null || !timeColumn && counts != null) { "У «$name» укажите число подходов и повторы или длительность с единицей." }
+            val reps = if (time == null) interval(requireNotNull(counts)[2], 9999, "повторы у $name") else 1 to 1
+            val count = counts?.get(1)?.let { positive(it, 100, "подходы у $name") } ?: 1
             val seconds = if (plain(restText) in listOf("?", "-")) null else {
                 val (length, unit) = (rest.matchEntire(plain(restText)) ?: error("Неясный отдых у «$name».")).destructured
                 val mult = if (unit.lowercase() in setOf("мин", "min")) 60 else 1
@@ -231,10 +241,21 @@ internal object ProgramImport {
                 BlockType.MOBILITY -> SetRole.TECHNIQUE
                 else -> null
             }
-            ExercisePlan(Exercise(stableId("markdown-exercise/${key(name)}"), name),
-                List(count) { SetPlan(repsMin = reps.first, repsMax = reps.second, weightKnown = false, role = role) },
+            val exercise = Exercise(stableId("markdown-exercise/${key(name)}"), name,
+                movement = time?.takeUnless { block.type == BlockType.CARDIO }?.let { MovementDetails(measures = setOf(Measure.DURATION)) },
+                cardio = CardioType.OTHER.takeIf { time != null && block.type == BlockType.CARDIO })
+            ExercisePlan(exercise,
+                List(count) { SetPlan(repsMin = reps.first, repsMax = reps.second, weightKnown = false, repsKnown = time == null,
+                    role = role, durationSeconds = time) },
                 block = block.requirement, blockId = block.id, restSeconds = seconds?.first, restMaxSeconds = seconds?.second)
         }
+    }
+
+    private fun durationValue(text: String): Double? {
+        val (amount, unit) = (duration.matchEntire(text) ?: return null).destructured
+        val seconds = (amount.replace(',', '.').toDoubleOrNull() ?: return null) *
+            if (unit.equals("мин", true) || unit.equals("min", true)) 60 else 1
+        return seconds.takeIf(Measure.DURATION::accepts)
     }
 
     private fun parsePhases(section: Section, frequency: Int, duration: Int?): List<CyclePhase> {

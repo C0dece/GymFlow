@@ -148,25 +148,6 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
             try { repo.schedule() } finally { flush.trySend(Unit) }
         }
     }
-    fun addMovementExamples() {
-        commands.trySend {
-            repo.update { state ->
-                val names = listOf("Вертикальная тяга", "Горизонтальная тяга", "Горизонтальный жим", "Стабилизация корпуса")
-                val families = names.map { name ->
-                    state.families.find { it.name.equals(name, true) } ?: MovementFamily(stableId("movement-example/$name"), name)
-                }
-                val examples = listOf(
-                    Exercise(id = stableId("movement-example/pulldown"), name = "Тяга верхнего блока", load = Load.MACHINE,
-                        muscle = "Широчайшие, бицепс", movement = MovementDetails(familyId = families[0].id, equipment = "Блок", quality = Quality.STRENGTH)),
-                    Exercise(id = stableId("movement-example/plank"), name = "Планка на предплечьях", load = Load.BODYWEIGHT,
-                        muscle = "Мышцы корпуса", movement = MovementDetails(familyId = families[3].id, quality = Quality.CONTROL, measures = setOf(Measure.HOLD))),
-                ).filter { example -> state.exercises.none { it.id == example.id || it.name.equals(example.name, true) } }
-                families.filter { candidate -> state.families.none { it.id == candidate.id } } + examples
-            }
-            flush.trySend(Unit)
-        }
-    }
-
     fun saveCatalogExercise(scope: String, original: Exercise?, next: Exercise, result: (String?) -> Unit) {
         commands.trySend {
             try {
@@ -476,7 +457,7 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
             val existing = state.sessions.find { it.id == id && it.status in setOf(SessionStatus.PLANNED, SessionStatus.ACTIVE) }
                 ?: error(app.getString(R.string.session_missing))
             val plan = if (existing.workouts.any { it.cycleSlot != null }) existing.onCycleVisit(LocalDate.now()) else existing
-            plan.start() to emptyList()
+            plan.start(previous = existing) to emptyList()
         } else {
             val self = state.availableProfiles.find { it.id == preferences.value.athlete } ?: state.availableProfiles.firstOrNull()
             val profile = self ?: Profile(name = app.getString(R.string.self))
@@ -498,7 +479,15 @@ class GymModel(private val app: Application) : AndroidViewModel(app) {
             state.programs.any { it.id == draft.programId && it.completionCycle != null }
         val withNotes = draft.copy(workoutNotes = existing?.workoutNotes.orEmpty())
         val planned = if (start && cycle) withNotes.onCycleVisit(LocalDate.now()) else withNotes
-        (if (start) planned.start() else planned) to (draft.participants.filter { it.id !in people } + newExercises)
+        (if (start) planned.start(previous = existing) else planned) to (draft.participants.filter { it.id !in people } + newExercises)
+    }
+
+    fun closeSession(scope: String, original: Session, cancel: Boolean, onSaved: () -> Unit) {
+        commands.trySend {
+            repo.closeSession(scope, original, cancel)
+            flush.trySend(Unit)
+            onSaved()
+        }
     }
 
     fun savePersonalPlan(workout: ParticipantWorkout, program: Program?, day: WorkoutTemplate?, sessionTitle: String) {

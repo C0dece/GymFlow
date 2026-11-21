@@ -165,7 +165,6 @@ internal fun MovementScreen(library: Library, preferredProfile: String, model: G
                             Button(onClick = { editFamily = false }, modifier = Modifier.testTag("new_family")) { Text("Создать семейство") }
                             if (library.families.isEmpty()) {
                                 Muted("Объедините упражнения с общим движением. У каждой вариации своя история.")
-                                TextButton(onClick = model::addMovementExamples) { Text("Добавить примеры") }
                             }
                             library.families.forEach { item ->
                                 CardBlock(onClick = { familyId = item.id }) { Text(item.name) }

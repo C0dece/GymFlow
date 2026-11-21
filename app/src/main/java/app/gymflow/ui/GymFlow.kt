@@ -1,10 +1,11 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package app.gymflow.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -215,7 +216,9 @@ private fun Home(
     val finished = library.sessions.filter { it.status == SessionStatus.COMPLETED }
     val archivedIds = library.programs.filter(Program::archived).mapTo(hashSetOf(), Program::id)
     val planned = library.sessions.filter { it.status == SessionStatus.PLANNED && it.programId !in archivedIds }.sortedBy { it.date }
-    val next = planned.firstOrNull()
+    val next = planned.firstOrNull { it.date >= today.toString() } ?: planned.lastOrNull()
+    val week = today.minusDays(today.dayOfWeek.value - 1L).toString()
+    val thisWeek = finished.count { it.date in week..today.toString() }
     val plannedMember = next?.let { it.workout(preferences.athlete) ?: it.defaultWorkout }
     val plannedProgram = if (next != null && plannedMember != null) workoutProgram(library.programs, next, plannedMember) else null
     val effectiveProgram = if (active != null) workoutProgram(library.programs, active, active.defaultWorkout)
@@ -233,7 +236,7 @@ private fun Home(
             library.programs.flatMap { program ->
                 val saved = slots[date.toString() to program.id].orEmpty()
                 val occupied = saved.mapTo(hashSetOf()) { it.programDayId }
-                val templates = plannedOn(program, date).filter { it.exercises.isNotEmpty() && it.id !in occupied }
+                val templates = plannedOn(program, date).filter { it.hasActivities() && it.id !in occupied }
                     .map { it.title }
                 val explicit = saved.filter { it.status == SessionStatus.PLANNED }.map { session ->
                     (session.workout(preferences.athlete) ?: session.defaultWorkout).templateTitle ?: session.title
@@ -253,11 +256,10 @@ private fun Home(
     val pending = library.records.count { it.pending && !it.localOnly }
 
     ScreenColumn(Modifier.testTag("home")) {
-        Muted(fullDate(today))
-        Text(stringResource(R.string.home_heading), style = MaterialTheme.typography.headlineLarge)
+        Text(fullDate(today), style = MaterialTheme.typography.titleMedium)
         Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Symbol(R.drawable.ic_dumbbell, modifier = Modifier.size(22.dp))
                     Text(when {
@@ -286,8 +288,10 @@ private fun Home(
                     val complete = active.workouts.sumOf { it.completed }
                     val total = complete + active.workouts.sumOf { it.remaining }
                     Text(stringResource(R.string.sets_progress, complete, total))
+                    if (total > 0) LinearProgressIndicator(progress = { complete.toFloat() / total }, modifier = Modifier.fillMaxWidth())
                 } else if (next != null) {
                     Text(shortDate(next.date))
+                    plannedMember?.let { Muted(stringResource(R.string.workout_summary, it.exercises.size, it.remaining)) }
                 }
                 Button(
                     onClick = {
@@ -302,27 +306,44 @@ private fun Home(
                     Text(stringResource(if (active != null) R.string.continue_training else if (next != null) R.string.view_plan
                         else R.string.start_workout))
                 }
-                if (next == null || active != null) {
-                    OutlinedButton(onClick = { preview(next?.id) }, modifier = Modifier.fillMaxWidth().testTag("view_plan")) {
-                        Text(stringResource(R.string.view_plan))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (next == null || active != null) {
+                        TextButton(onClick = { preview(next?.id) }, modifier = Modifier.testTag("view_plan")) {
+                            Text(stringResource(R.string.view_plan))
+                        }
                     }
-                }
-                if (active != null) {
-                    TextButton(onClick = { start(null) }, modifier = Modifier.testTag("new_active")) { Text(stringResource(R.string.new_session)) }
-                }
-                if (active == null && next != null) {
-                    if (canSwitchDay) OutlinedButton(
-                        onClick = { choosePlannedDay = true },
-                        modifier = Modifier.fillMaxWidth().testTag("planned_switch_day"),
-                    ) { Text(stringResource(R.string.switch_day)) }
-                    TextButton(onClick = { start(null) }) { Text(stringResource(R.string.free_session)) }
+                    if (active != null) {
+                        TextButton(onClick = { start(null) }, modifier = Modifier.testTag("new_active")) { Text(stringResource(R.string.new_session)) }
+                    } else if (next != null) {
+                        if (canSwitchDay) TextButton(onClick = { choosePlannedDay = true },
+                            modifier = Modifier.testTag("planned_switch_day")) { Text(stringResource(R.string.switch_day)) }
+                        TextButton(onClick = { start(null) }) { Text(stringResource(R.string.free_session)) }
+                    }
                 }
             }
         }
 
         CycleCards(library, preferences.athlete, prepareCycle, extendCycle)
-        OutlinedButton(onClick = progression, modifier = Modifier.fillMaxWidth().testTag("open_progression")) {
-            Text(stringResource(R.string.progression))
+        CardBlock {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Эта неделя", style = MaterialTheme.typography.titleMedium)
+                    Muted("Завершено тренировок: $thisWeek")
+                }
+                IconButton(onClick = progression, modifier = Modifier.testTag("open_progression")) {
+                    Symbol(R.drawable.ic_history, description = stringResource(R.string.progression))
+                }
+            }
+            finished.firstOrNull()?.let {
+                HorizontalDivider()
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).clickable { open(it.id) }) {
+                        Muted("${stringResource(R.string.last_workout)} · ${shortDate(it.date)}")
+                        Text(it.title, style = MaterialTheme.typography.titleMedium)
+                    }
+                    TextButton(onClick = { repeat(it.id) }) { Text(stringResource(R.string.repeat_workout)) }
+                }
+            }
         }
         if (library.unreadable > 0) InlineStatus(stringResource(R.string.unreadable_documents, library.unreadable), warning = true)
         if (library.activeSessions.size > 1) {
@@ -354,28 +375,11 @@ private fun Home(
             }, warning = conflicts > 0 || status.issues.isNotEmpty())
         }
 
-        SectionTitle(stringResource(R.string.overview))
-        AdaptivePair(spacing = 10.dp) {
-            CardBlock(Modifier.weight(1f)) {
-                Text(finished.size.toString(), style = MaterialTheme.typography.headlineMedium)
-                Muted(stringResource(R.string.completed_workouts))
-            }
-            CardBlock(Modifier.weight(1f)) {
-                Text(library.exercises.count { !it.archived }.toString(), style = MaterialTheme.typography.headlineMedium)
-                Muted(stringResource(R.string.exercises))
-            }
-        }
-        finished.firstOrNull()?.let {
-            CardBlock {
-                Muted(stringResource(R.string.last_workout))
-                Text(it.title, style = MaterialTheme.typography.titleMedium)
-                Muted(shortDate(it.date))
-                TextButton(onClick = { repeat(it.id) }) { Text(stringResource(R.string.repeat_workout)) }
-            }
-        }
         if (upcoming.isNotEmpty() || planned.size > 1) {
             SectionTitle(stringResource(R.string.upcoming))
-            (planned.drop(1).map { it.date to it.title } + upcoming).distinct().sortedBy { it.first }.take(5).forEach { (date, title) ->
+            (planned.filter { it.id != next?.id }.map { it.date to it.title } + upcoming)
+                .filterNot { (date, title) -> next != null && date == next.date && title == next.title }
+                .distinct().sortedBy { it.first }.take(5).forEach { (date, title) ->
                 CardBlock {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Muted(shortDate(date))

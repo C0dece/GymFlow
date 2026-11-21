@@ -34,7 +34,7 @@ data class Library(
     val unreadable: Int = 0,
     val workoutComments: Map<String, String> = emptyMap(),
 ) {
-    val sessions = documents.filterIsInstance<Session>().sortedWith(newestSessionFirst)
+    val sessions = documents.filterIsInstance<Session>().filterNot(Session::discarded).sortedWith(newestSessionFirst)
     val programs = documents.filterIsInstance<Program>().sortedBy { it.title }
     val profiles = documents.filterIsInstance<Profile>().sortedBy { it.name }
     val exercises = documents.filterIsInstance<Exercise>().sortedBy { it.name }
@@ -44,7 +44,11 @@ data class Library(
     val skills = documents.filterIsInstance<MovementSkill>().sortedBy { it.name }
     val attempts = documents.filterIsInstance<SkillAttempt>().sortedByDescending { it.date }
     val policies = documents.filterIsInstance<ProgressionPolicy>()
-    val reviews = documents.filterIsInstance<ProgressionReview>().sortedByDescending { it.date }
+    val reviews = documents.filterIsInstance<ProgressionReview>().let { rows ->
+        val sessionsById = documents.filterIsInstance<Session>().associateBy(Session::id)
+        rows.filter { review -> sessionsById[review.sessionId]?.completedWorkouts(review.profileId)?.isNotEmpty() == true }
+            .sortedByDescending { it.date }
+    }
     val notes = documents.filterIsInstance<SportNote>().filterNot { it.deleted }
 
     val activeSessions = sessions.filter { it.status == SessionStatus.ACTIVE }.sortedByDescending { it.started }
@@ -212,7 +216,7 @@ class Repository(private val context: Context, private val journal: Journal, val
         val scope = settings.values.first().scope
         journal.withTransaction {
             val session = records.get(scope, id)?.let(::decoded) as? Session ?: error("Тренировка не найдена")
-            check(!session.status.let { it == SessionStatus.COMPLETED || it == SessionStatus.SKIPPED }) {
+            check(!session.discarded && session.status in setOf(SessionStatus.PLANNED, SessionStatus.ACTIVE)) {
                 "Тренировка закрыта"
             }
             val edited = edit(session)
@@ -225,6 +229,32 @@ class Repository(private val context: Context, private val journal: Journal, val
             }.map { it.profile.id }.toSet()
             val reviews = progressionReviews(scope, after, people)
             (extras + after + reviews).filter { stage(scope, it) }.map { it.id }.toSet()
+        }
+    }
+
+    suspend fun closeSession(scope: String, original: Session, cancel: Boolean) = update { library ->
+        check(library.scope == scope) { "Папка изменилась. Откройте тренировку повторно." }
+        val session = library.sessions.firstOrNull { it.id == original.id }
+        check(session == original) { "Тренировка изменилась. Проверьте её и повторите действие." }
+        check(library.records.firstOrNull { it.id == original.id }?.conflict == null) {
+            "Сначала разрешите конфликт файла тренировки в настройках."
+        }
+        val next = requireNotNull(session)
+        if (cancel) {
+            val program = library.programs.find { it.id == next.programId }
+            val day = program?.days?.find { it.id == next.programDayId }
+            if (next.beforeStart == null && program != null && day != null) {
+                check(next.status == SessionStatus.ACTIVE)
+                val date = next.scheduledFor ?: next.date
+                val restored = next.workouts.map { row ->
+                    ParticipantWorkout(profile = row.profile, cycleSlot = row.cycleSlot).withTemplate(day)
+                }
+                listOf(next.copy(title = day.title, date = date, status = SessionStatus.PLANNED, workouts = restored,
+                    otherWorkouts = emptyList(), switchedProfileId = null, started = null, finished = null, progression = emptyList()))
+            } else listOf(next.cancelStart())
+        } else {
+            check(next.status == SessionStatus.COMPLETED)
+            listOf(next.copy(discarded = true))
         }
     }
 
@@ -314,7 +344,7 @@ class Repository(private val context: Context, private val journal: Journal, val
             val fallback = library.availableProfiles.find { it.id == primary } ?: library.availableProfiles.firstOrNull()
             val additions = mutableListOf<Document>()
             val self = fallback ?: Profile(name = "Я")
-            val sessionIds = library.sessions.map { it.id }.toHashSet()
+            val sessionIds = library.documents.filterIsInstance<Session>().mapTo(hashSetOf(), Session::id)
             val catalog = library.exercises.associateBy { it.id }
             library.programs.filterNot(Program::archived).forEach { program ->
                 val selected = if (program.participantIds.isEmpty()) listOf(self) else
@@ -340,7 +370,7 @@ class Repository(private val context: Context, private val journal: Journal, val
                     }
                     return@forEach
                 }
-                plannedOn(program, today).filter { it.exercises.isNotEmpty() }.forEach { day ->
+                plannedOn(program, today).filter(WorkoutTemplate::hasActivities).forEach { day ->
                     val duplicate = library.sessions.any {
                         it.programId == program.id && it.programDayId == day.id && it.date == today.toString()
                     }
@@ -362,7 +392,7 @@ class Repository(private val context: Context, private val journal: Journal, val
                 }
             }
             val needsCycleProfile = library.programs.any { !it.archived && it.enabled && it.completionCycle != null &&
-                it.participantIds.isEmpty() && it.days.any { day -> day.orderedExercises().isNotEmpty() } }
+                it.participantIds.isEmpty() && it.days.any(WorkoutTemplate::hasActivities) }
             if (fallback == null && (additions.isNotEmpty() || needsCycleProfile)) additions.add(self)
             additions
         }

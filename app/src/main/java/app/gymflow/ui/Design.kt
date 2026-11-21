@@ -99,7 +99,8 @@ fun CardBlock(
 ) {
     val colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     val inner: @Composable ColumnScope.() -> Unit = {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
     }
     if (onClick == null) Card(modifier.fillMaxWidth(), colors = colors, content = inner)
     else Card(onClick = onClick, modifier = modifier.fillMaxWidth(), colors = colors, content = inner)
@@ -110,8 +111,8 @@ fun ScreenColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(
             Modifier.widthIn(max = 720.dp).fillMaxSize().verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
             content = content,
         )
     }

@@ -16,6 +16,16 @@ import app.gymflow.data.Library
 import app.gymflow.data.Preferences
 import app.gymflow.domain.*
 
+private enum class ExerciseMode(val label: String) {
+    STRENGTH("Вес и повторы"), TIMED("На время"), CARDIO("Кардио")
+}
+
+private fun Exercise?.mode() = when {
+    this?.cardio != null -> ExerciseMode.CARDIO
+    this?.tracksDuration == true -> ExerciseMode.TIMED
+    else -> ExerciseMode.STRENGTH
+}
+
 @Composable
 fun ExerciseEditor(
     title: String,
@@ -28,18 +38,12 @@ fun ExerciseEditor(
     trainingBlocks: List<TrainingBlock> = emptyList(),
     save: (ExercisePlan, Exercise?) -> Unit,
 ) {
-    val recent = remember(library.sessions) {
-        library.sessions.asSequence().flatMap { session -> session.workouts.asSequence() }
-            .flatMap { it.exercises.asSequence() }.map { it.exercise.id }.distinct().take(8).toList()
-    }
-    val preferred = remember(library.programs) {
-        library.programs.flatMap { it.days }.flatMap { it.exercises }.map { it.exercise.id }.toSet()
-    }
     val fallback = SetPlan(prefs.initialWeight, prefs.minReps, prefs.maxReps)
     var rows by rememberPlanSets(initial?.sets ?: List(prefs.initialSets) { fallback })
     var name by rememberSaveable { mutableStateOf(initial?.exercise?.name.orEmpty()) }
     var picked by rememberSaveable { mutableStateOf(initial?.exercise?.id) }
-    var filter by rememberSaveable { mutableIntStateOf(0) }
+    var catalogOpen by rememberSaveable { mutableStateOf(false) }
+    var catalogQuery by rememberSaveable { mutableStateOf("") }
     var showOptions by rememberSaveable { mutableStateOf(false) }
     var load by rememberSaveable { mutableStateOf(initial?.exercise?.load ?: Load.OTHER) }
     var unit by rememberSaveable { mutableStateOf(initial?.exercise?.unit ?: prefs.unit) }
@@ -49,6 +53,8 @@ fun ExerciseEditor(
     var skillId by rememberSaveable { mutableStateOf(initial?.skillId) }
     var blockId by rememberSaveable { mutableStateOf(initial?.blockId) }
     var cardio by rememberSaveable { mutableStateOf<CardioType?>(initial?.exercise?.cardio) }
+    var mode by rememberSaveable { mutableStateOf(initial?.exercise.mode()) }
+    var overrideMode by rememberSaveable { mutableStateOf(false) }
     var rest by rememberSaveable { mutableStateOf(initial?.restSeconds?.toString().orEmpty()) }
     var restMax by rememberSaveable { mutableStateOf(initial?.restMaxSeconds?.toString().orEmpty()) }
     var autoRest by rememberSaveable { mutableStateOf(initial?.autoRest ?: false) }
@@ -60,15 +66,24 @@ fun ExerciseEditor(
     val selected = library.exercises.find { it.id == picked }
         ?: initial?.exercise?.takeIf { it.id == picked }
         ?: library.exercises.find { !it.archived && it.name.trim().equals(name.trim(), ignoreCase = true) }
-    val suggestions = library.exercises.filter { exercise ->
-        !exercise.archived && exercise.id != picked && when {
-            name.isNotBlank() && picked == null -> exercise.name.contains(name.trim(), true)
-            filter == 1 -> exercise.favorite
-            filter == 2 -> exercise.id in preferred
-            else -> exercise.id in recent
-        }
-    }.take(6)
-    val plans = rows.plansOrNull()
+    val candidate = (initial?.exercise ?: Exercise(id = "draft", name = name)).copy(name = name, unit = unit, load = load)
+    val source = initial?.exercise?.takeIf { it.id == selected?.id } ?: selected
+    val base = source ?: candidate
+    val effective = if (source != null && !overrideMode) source else when (mode) {
+        ExerciseMode.CARDIO -> base.copy(cardio = cardio ?: CardioType.OTHER)
+        ExerciseMode.TIMED -> base.copy(cardio = null, movement = (base.movement ?: MovementDetails()).let {
+            it.copy(measures = it.measures + Measure.DURATION)
+        })
+        ExerciseMode.STRENGTH -> base.copy(cardio = null, movement = base.movement?.let {
+            it.copy(measures = it.measures - setOf(Measure.DURATION, Measure.HOLD, Measure.BALANCE, Measure.DISTANCE))
+        })
+    }
+    val shownMode = if (overrideMode || source == null) mode else source.mode()
+    val catalog = library.exercises.filterNot(Exercise::archived)
+    val suggestions = if (selected == null && name.isNotBlank() && !catalogOpen) {
+        catalog.filter { it.name.contains(name.trim(), true) }.take(4)
+    } else emptyList()
+    val plans = rows.plansOrNull(effective.tracksDuration)
     val restValue = positiveInt(rest)?.takeIf { it <= 86400 }
     val restMaxValue = positiveInt(restMax)?.takeIf { restValue != null && it in restValue..86400 }
     val warm = positiveInt(warmCount)?.takeIf { it <= 100 }
@@ -80,59 +95,71 @@ fun ExerciseEditor(
         (restMax.isBlank() || restMaxValue != null)
     fun useTimedDefaults() {
         if (initial == null && rows.all { it.result() == fallback }) {
-            rows = rows.map { PlanSetDraft(it.key, fallback.copy(weightKnown = false, repsKnown = false)) }
+            rows = listOf(PlanSetDraft(rows.first().key, fallback.copy(weightKnown = false, repsKnown = false)))
         }
+    }
+    fun select(choice: Exercise) {
+        picked = choice.id
+        name = choice.name
+        load = choice.load
+        unit = choice.unit
+        overrideMode = false
+        if (choice.tracksDuration) useTimedDefaults()
+        catalogOpen = false
     }
     EditorSheet(title, close, footer = {
         PlanEditorActions(close, stringResource(if (initial == null) R.string.add else R.string.save), ready, "save_exercise") {
             if (plans != null && ready) {
-                val first = plans.first()
-                val exercise = selected ?: (initial?.exercise?.copy(id = newId()) ?: Exercise(name = name.trim())).copy(
-                    name = name.trim(), unit = unit, load = load, repsMin = first.repsMin, repsMax = first.repsMax, cardio = cardio,
-                )
-                save(ExercisePlan(exercise, plans, initial?.individual.orEmpty(), block,
+                val savedPlans = if (effective.tracksDuration && initial == null) plans.map {
+                    it.copy(weightKnown = false, repsKnown = false, targetReps = null, maxEffort = false)
+                } else plans
+                val first = savedPlans.first()
+                val exercise = if (selected != null) effective else effective.copy(id = newId(), name = name.trim(),
+                    repsMin = first.repsMin, repsMax = first.repsMax)
+                save(ExercisePlan(exercise, savedPlans, initial?.individual.orEmpty(), block,
                     selection.takeIf { exercise.movement?.familyId != null } ?: MovementSelection.FIXED, skillId,
                     blockId, restValue, autoRest && restValue != null, caution.trim(),
                     restMaxValue, instructions.trim()), exercise.takeIf { selected == null })
             }
         }
     }) {
-        Field(name, stringResource(R.string.exercise_name), { name = it; picked = null }, Modifier.fillMaxWidth().testTag("exercise_name"))
-        if (initial == null && name.isBlank() && library.exercises.isNotEmpty()) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(stringResource(R.string.recent), stringResource(R.string.favorites), stringResource(R.string.from_program)).forEachIndexed { index, text ->
-                    FilterChip(filter == index, { filter = index }, label = { Text(text) })
-                }
+        Field(name, stringResource(R.string.exercise_name), { name = it; picked = null; overrideMode = false },
+            Modifier.fillMaxWidth().testTag("exercise_name"))
+        suggestions.forEach { choice ->
+            TextButton(onClick = { select(choice) }) { Text(choice.name) }
+        }
+        if (catalog.isNotEmpty()) {
+            TextButton(onClick = { catalogOpen = !catalogOpen; catalogQuery = "" },
+                modifier = Modifier.testTag("choose_plan_catalog")) {
+                Text(if (catalogOpen) "Закрыть каталог" else "Выбрать из каталога")
+            }
+            if (catalogOpen) {
+                Field(catalogQuery, "Поиск в каталоге", { catalogQuery = it }, Modifier.testTag("plan_catalog_search"))
+                val matching = catalog.filter { it.name.contains(catalogQuery.trim(), true) }
+                matching.take(12).forEach { choice -> TextButton(onClick = { select(choice) }) { Text(choice.name) } }
+                if (matching.isEmpty()) Muted("Упражнения не найдены.")
+                if (matching.size > 12) Muted("Уточните название, чтобы найти нужное упражнение.")
             }
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            suggestions.forEach { choice ->
-                SuggestionChip(onClick = {
-                    picked = choice.id
-                    name = choice.name
-                    load = choice.load
-                    unit = choice.unit
-                    if (choice.tracksDuration) useTimedDefaults()
-                }, label = { Text(choice.name) })
-            }
-        }
+        Choice(shownMode, ExerciseMode.entries, { it.label }, {
+            mode = it
+            overrideMode = true
+            if (it == ExerciseMode.CARDIO) cardio = effective.cardio ?: CardioType.OTHER
+            if (it != ExerciseMode.STRENGTH) { load = Load.OTHER; useTimedDefaults() }
+            else rows = rows.map { row -> row.copy(base = row.base.copy(durationSeconds = null), duration = "") }
+        }, "exercise_mode")
+        if (shownMode == ExerciseMode.CARDIO) Choice(effective.cardio ?: CardioType.OTHER, CardioType.entries, { it.label }, {
+            mode = ExerciseMode.CARDIO
+            overrideMode = true
+            cardio = it
+        }, "exercise_cardio")
         if (showOptions) {
-            if (selected == null) {
-                Choice(cardio, listOf(null) + CardioType.entries, { it?.label ?: "Силовое или другое упражнение" }, {
-                    cardio = it
-                    if (it != null) { load = Load.OTHER; useTimedDefaults() }
-                }, "exercise_cardio")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Load.entries.forEach { option ->
-                        FilterChip(load == option, { load = option }, label = { Text(loadText(option)) })
-                    }
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    UnitWeight.entries.forEach { option ->
-                        FilterChip(unit == option, { unit = option }, label = { Text(unitText(option)) })
-                    }
-                }
-            } else Muted("${loadText(selected.load)} · ${unitText(selected.unit)}")
+            if (selected == null && !effective.tracksDuration) {
+                val loads = Load.entries.map { it to loadText(it) }.toMap()
+                val units = UnitWeight.entries.map { it to unitText(it) }.toMap()
+                Choice(load, Load.entries, loads::getValue, { load = it }, "exercise_load")
+                Choice(unit, UnitWeight.entries, units::getValue, { unit = it }, "exercise_weight_unit")
+            }
         }
         OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.testTag("exercise_options")) {
             Text(stringResource(if (showOptions) R.string.hide_options else R.string.exercise_options))
@@ -147,8 +174,8 @@ fun ExerciseEditor(
             }
             if (restValue != null) FilterChip(autoRest, { autoRest = !autoRest }, label = { Text("Запускать таймер после подхода") })
             Field(caution, "Ограничения упражнения", { caution = it }, singleLine = false)
-            TextButton(onClick = { warmupTemplate = !warmupTemplate }) { Text("Шаблон разминочных подходов") }
-            if (warmupTemplate) {
+            if (!effective.tracksDuration) TextButton(onClick = { warmupTemplate = !warmupTemplate }) { Text("Шаблон разминочных подходов") }
+            if (warmupTemplate && !effective.tracksDuration) {
                 Field(warmCount, "Разминочных подходов", { warmCount = it }, keyboard = KeyboardType.Number)
                 Field(rampCount, "Подводящих подходов", { rampCount = it }, keyboard = KeyboardType.Number)
                 Field(warmReps, "Повторов в этих подходах (необязательно)", { warmReps = it }, keyboard = KeyboardType.Number)
@@ -175,7 +202,7 @@ fun ExerciseEditor(
             }
         }
         Field(instructions, "Примечания к упражнению в плане", { instructions = it }, singleLine = false)
-        PlanSets(rows, selected?.unit ?: unit, fallback) { rows = it }
+        PlanSets(rows, effective, fallback.copy(weightKnown = !effective.tracksDuration, repsKnown = !effective.tracksDuration)) { rows = it }
         options()
 
     }

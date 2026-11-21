@@ -14,6 +14,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -100,7 +102,7 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
             }
             shown.forEach { item ->
-                CardBlock(onClick = { currentId = item.id }) {
+                CardBlock(Modifier.testTag("program_${item.id}"), onClick = { currentId = item.id }) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -372,57 +374,48 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
                 }
             }
 
-            // Day Notes Card (Warmup/Cooldown)
-            if (day.notes.isNotBlank()) {
-                CardBlock {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(stringResource(R.string.day_notes), style = MaterialTheme.typography.titleMedium)
-                        TextButton(onClick = { editingDayId = day.id; editDay = true }) {
-                            Text(stringResource(R.string.change))
-                        }
-                    }
-                    Text(day.notes, style = MaterialTheme.typography.bodyMedium)
-                }
-            } else {
-                OutlinedCard(
-                    onClick = { editingDayId = day.id; editDay = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Symbol(R.drawable.ic_add, modifier = Modifier.size(18.dp))
-                        Text("+ Добавить разминку, заминку или примечания", style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
+            if (day.notes.isNotBlank()) CardBlock {
+                Text("Примечания к дню", style = MaterialTheme.typography.titleSmall)
+                Muted(day.notes)
             }
 
             if (day.blocks.isNotEmpty()) {
                 SectionTitle("Блоки тренировки")
                 day.blocks.forEachIndexed { index, block ->
                     CardBlock {
-                        Text(block.name, style = MaterialTheme.typography.titleMedium)
-                        Muted(block.requirement.label + if (block.enabled) "" else " · Отключён")
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { blockId = block.id }) { Text("Изменить блок") }
-                            if (index > 0) TextButton(onClick = {
-                                model.changeDay(program.id, day.id) { current ->
-                                    current.copy(blocks = current.blocks.toMutableList().apply { add(index - 1, removeAt(index)) })
+                        var menu by remember(block.id) { mutableStateOf(false) }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f).clickable { blockId = block.id }) {
+                                Text(block.name, style = MaterialTheme.typography.titleMedium)
+                                val details = listOfNotNull(block.durationSeconds?.let(::durationText),
+                                    block.requirement.label.takeIf { block.requirement != PlanBlock.REQUIRED },
+                                    "Отключён".takeUnless { block.enabled })
+                                if (details.isNotEmpty()) Muted(details.joinToString(" · "))
+                            }
+                            IconButton(onClick = { menu = true }) { Symbol(R.drawable.ic_more, description = "Действия блока") }
+                            DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem(text = { Text("Изменить блок") }, onClick = { menu = false; blockId = block.id })
+                                listOf(-1 to "Выше", 1 to "Ниже").forEach { (step, label) ->
+                                    DropdownMenuItem(text = { Text(label) }, enabled = index + step in day.blocks.indices, onClick = {
+                                        menu = false
+                                        model.changeDay(program.id, day.id) { current ->
+                                            val from = current.blocks.indexOfFirst { it.id == block.id }
+                                            val to = from + step
+                                            if (from < 0 || to !in current.blocks.indices) current
+                                            else current.copy(blocks = current.blocks.toMutableList().apply { add(to, removeAt(from)) })
+                                        }
+                                    })
                                 }
-                            }) { Text(stringResource(R.string.move_up)) }
-                            TextButton(onClick = {
-                                model.changeDay(program.id, day.id) { current ->
-                                    current.copy(blocks = current.blocks.filter { it.id != block.id })
-                                }
-                            }) { Text(stringResource(R.string.remove), color = MaterialTheme.colorScheme.error) }
+                                DropdownMenuItem(text = { Text("Удалить блок") }, onClick = {
+                                    menu = false
+                                    model.changeDay(program.id, day.id) { current ->
+                                        current.copy(blocks = current.blocks.filter { it.id != block.id },
+                                            exercises = current.exercises.map { if (it.blockId == block.id) it.copy(blockId = null) else it })
+                                    }
+                                })
+                            }
                         }
+                        if (block.guidance.isNotBlank()) Muted(block.guidance, Modifier.clickable { blockId = block.id })
                     }
                 }
             }
@@ -440,56 +433,41 @@ fun Programs(library: Library, prefs: Preferences, model: GymModel, preview: (St
 
             day.exercises.forEachIndexed { index, plan ->
                 CardBlock {
+                    var menu by remember { mutableStateOf(false) }
                     val exerciseName = library.exercises.find { it.id == plan.exercise.id }?.name ?: plan.exercise.name
-                    Text(exerciseName, style = MaterialTheme.typography.titleMedium)
-                    day.blocks.find { it.id == plan.blockId }?.let {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                        ) {
-                            Text(it.name, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
-                        }
+                    val blockName = day.blocks.find { it.id == plan.blockId }?.name
+                    val common = plan.sets.distinct().singleOrNull()
+                    val summary = common?.let { "${plan.sets.size} × ${plannedSetText(it, plan.exercise)}" }
+                        ?: "${stringResource(R.string.set_count)} · ${plan.sets.size}"
+                    Column(Modifier.fillMaxWidth().clickable { editPlan = index }.testTag("edit_program_exercise_$index")
+                        .padding(vertical = 4.dp)) {
+                        Text(exerciseName, style = MaterialTheme.typography.titleMedium)
+                        Muted(listOfNotNull(summary, blockName).joinToString(" · "))
+                        if (plan.instructions.isNotBlank()) Text(plan.instructions, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyMedium)
                     }
-                    plan.sets.forEachIndexed { setIndex, set ->
-                        Muted("${setIndex + 1}. ${set.purpose.label} · ${plannedSetText(set, plan.exercise)}")
-                    }
-                    if (plan.instructions.isNotBlank()) Muted(plan.instructions)
-
-                    if (plan.individual.isNotEmpty()) {
-                        val details = plan.individual.mapNotNull { (pid, sets) ->
-                            val name = library.profiles.find { it.id == pid }?.name ?: return@mapNotNull null
-                            val firstSet = sets.firstOrNull { it.purpose == SetRole.WORK } ?: sets.firstOrNull() ?: return@mapNotNull null
-                            val w = if (firstSet.weightKnown) "${number(firstSet.weight)} ${unitText(plan.exercise.unit)}" else "?"
-                            "$name: $w"
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                        Box {
+                            IconButton(onClick = { menu = true }) { Symbol(R.drawable.ic_settings, description = "Действия упражнения") }
+                            DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem(text = { Text(stringResource(R.string.change)) }, onClick = { menu = false; editPlan = index })
+                                if (library.profiles.isNotEmpty()) DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.personal_load)) }, onClick = { menu = false; individual = index })
+                                DropdownMenuItem(text = { Text(stringResource(R.string.duplicate)) }, onClick = {
+                                    menu = false
+                                    submitDay(program, day, day.copy(exercises = day.exercises.toMutableList().apply { add(index + 1, plan) })) {}
+                                })
+                            }
                         }
-                        if (details.isNotEmpty()) {
-                            Muted("Индивидуально: " + details.joinToString(" · "))
+                        listOf(-1 to R.string.move_up, 1 to R.string.move_down).forEach { (step, label) ->
+                            val tag = if (step < 0) "program_exercise_up_$index" else "program_exercise_down_$index"
+                            IconButton(onClick = {
+                                submitDay(program, day, day.copy(exercises = day.exercises.toMutableList().apply { add(index + step, removeAt(index)) })) {}
+                            }, enabled = index + step in day.exercises.indices, modifier = Modifier.testTag(tag)) {
+                                Symbol(R.drawable.ic_forward, Modifier.rotate(if (step < 0) -90f else 90f), stringResource(label))
+                            }
                         }
-                    }
-
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editPlan = index }, modifier = Modifier.testTag("edit_program_exercise_$index")) {
-                            Text(stringResource(R.string.change))
-                        }
-                        if (library.profiles.isNotEmpty()) {
-                            TextButton(onClick = { individual = index }) { Text(stringResource(R.string.personal_load)) }
-                        }
-                        if (index > 0) TextButton(onClick = {
-                            submitDay(program, day, day.copy(exercises = day.exercises.toMutableList().apply {
-                                add(index - 1, removeAt(index))
-                            })) {}
-                        }, modifier = Modifier.testTag("program_exercise_up_$index")) { Text(stringResource(R.string.move_up)) }
-                        if (index < day.exercises.lastIndex) TextButton(onClick = {
-                            submitDay(program, day, day.copy(exercises = day.exercises.toMutableList().apply {
-                                add(index + 1, removeAt(index))
-                            })) {}
-                        }, modifier = Modifier.testTag("program_exercise_down_$index")) { Text(stringResource(R.string.move_down)) }
-                        TextButton(onClick = {
-                            submitDay(program, day, day.copy(exercises = day.exercises.toMutableList().apply { add(index + 1, plan) })) {}
-                        }) { Text(stringResource(R.string.duplicate)) }
-                        TextButton(onClick = { deleteExercise = index to plan }) {
-                            Text(stringResource(R.string.remove), color = MaterialTheme.colorScheme.error)
-                        }
+                        IconButton(onClick = { deleteExercise = index to plan }) { Symbol(R.drawable.ic_delete, description = "Удалить упражнение") }
                     }
                 }
             }
@@ -799,8 +777,7 @@ private fun DayEditor(day: ProgramDay?, cycle: Boolean, close: () -> Unit, save:
                 DayOfWeek.entries.forEach { option -> FilterChip(date == option, { date = option }, label = { Text(weekday(option)) }) }
             }
         }
-        Field(notes, stringResource(R.string.day_notes), { notes = it }, singleLine = false)
-        Muted("Укажите разминку, параметры дорожки, заминку или рекомендации к тренировочному дню.")
+        Field(notes, "Примечания к дню", { notes = it }, singleLine = false)
         Button(
             onClick = {
                 save((day ?: ProgramDay(title = title.trim())).copy(
@@ -825,22 +802,24 @@ private fun PersonalPlan(plan: ExercisePlan, profiles: List<Profile>, close: () 
     val baseline = plan.individual[id]?.takeIf { id !in reset } ?: plan.sets
     val initial = remember(id, baseline) { baseline.map { PlanSetDraft(newId(), it) } }
     val rows = edits[id] ?: initial
-    val valid = edits.values.all { it.plansOrNull() != null }
+    val timed = plan.exercise.tracksDuration
+    val valid = edits.values.all { it.plansOrNull(timed) != null }
     EditorSheet(stringResource(R.string.personal_load), close, footer = {
         PlanEditorActions(close, stringResource(R.string.save), valid, "save_personal_plan") {
-            save(plan.copy(individual = (plan.individual - reset.toSet()) + edits.mapValues { requireNotNull(it.value.plansOrNull()) }))
+            save(plan.copy(individual = (plan.individual - reset.toSet()) + edits.mapValues { requireNotNull(it.value.plansOrNull(timed)) }))
         }
     }) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             profiles.forEach { profile -> FilterChip(id == profile.id, { id = profile.id }, label = { Text(profile.name) }) }
         }
         key(id) {
-            PlanSets(rows, plan.exercise.unit, SetPlan(repsMin = plan.exercise.repsMin, repsMax = plan.exercise.repsMax)) {
+            PlanSets(rows, plan.exercise, SetPlan(repsMin = plan.exercise.repsMin, repsMax = plan.exercise.repsMax,
+                weightKnown = !plan.exercise.tracksDuration, repsKnown = !plan.exercise.tracksDuration)) {
                 edits = edits + (id to it)
                 reset = ArrayList(reset - id)
             }
         }
-        if (!valid && rows.plansOrNull() != null) InlineStatus("Проверьте незаполненные поля у других участников.", true)
+        if (!valid && rows.plansOrNull(timed) != null) InlineStatus("Проверьте незаполненные поля у других участников.", true)
         if (id in plan.individual && id !in reset || id in edits) TextButton(onClick = {
             edits = edits - id
             reset = ArrayList(reset + id)

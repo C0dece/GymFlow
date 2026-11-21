@@ -92,13 +92,11 @@ fun History(library: Library, prefs: Preferences, open: (String) -> Unit, repeat
                 }
                 val exact = series.filter { it.exercise.load == exercise.load }
                 val measured = exact.filter { it.actuals.any { actual -> actual.weightKnown } }
-                if (exercise.cardio != null) {
-                    item { Muted(exercise.cardio.label) }
-                    val aerobic = exact.flatMap { row -> row.actuals.flatMap { actual ->
-                        actual.measurements.entries.map { (kind, value) -> kind to (row.date to value) }
-                    } }.groupBy({ it.first }, { it.second })
-                    aerobic.forEach { (kind, points) -> item { Trend(kind.label, points) } }
-                } else if (exact.isNotEmpty()) {
+                val measuredResults = series.flatMap { row -> row.actuals.flatMap { actual ->
+                    actual.measurements.entries.map { (kind, value) -> kind to (row.date to value) }
+                } }.groupBy({ it.first }, { it.second })
+                measuredResults.forEach { (kind, points) -> item { Trend(kind.label, points) } }
+                if (exact.any { row -> row.actuals.any { it.repsKnown || it.weightKnown } }) {
                     if (measured.isNotEmpty()) item { Trend(stringResource(R.string.working_weight), measured.map { it.date to it.maxKg }) }
                     item {
                         CardBlock {

@@ -63,6 +63,7 @@ data class SetPlan(
     val repsKnown: Boolean = true,
     val targetReps: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val role: SetRole? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val durationSeconds: Double? = null,
 ) {
     val purpose: SetRole get() = role ?: if (warmup) SetRole.WARMUP else SetRole.WORK
 }

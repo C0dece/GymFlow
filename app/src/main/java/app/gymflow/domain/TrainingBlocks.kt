@@ -1,6 +1,7 @@
 package app.gymflow.domain
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
 
 @Serializable
 enum class BlockType(val label: String) {
@@ -12,9 +13,18 @@ enum class BlockType(val label: String) {
 data class TrainingBlock(
     val id: String = newId(), val type: BlockType, val name: String, val requirement: PlanBlock = PlanBlock.REQUIRED,
     val guidance: String = "", val enabled: Boolean = true, val expandedOnly: Boolean = false,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val durationSeconds: Double? = null,
 ) {
-    init { require(name.isNotBlank()) }
+    init {
+        require(name.isNotBlank())
+        require(durationSeconds == null || Measure.DURATION.accepts(durationSeconds))
+    }
 }
+
+internal val TrainingBlock.hasGuidance get() = guidance.isNotBlank() || durationSeconds != null
+
+internal fun WorkoutTemplate.hasActivities() = orderedExercises().isNotEmpty() || blocks.any { it.enabled && it.hasGuidance }
 
 @Serializable
 enum class CardioType(val label: String) {

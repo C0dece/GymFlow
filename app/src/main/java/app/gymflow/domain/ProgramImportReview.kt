@@ -58,7 +58,14 @@ internal fun reviewImport(
             cycle.copy(extensions = current?.completionCycle?.extensions ?: cycle.extensions)
         },
         days = sourceProgram.days.map { day -> day.copy(exercises = day.exercises.map {
-            it.copy(exercise = resolved.getValue(it.exercise.id))
+            val mapped = resolved.getValue(it.exercise.id)
+            val exercise = if (it.sets.any { set -> set.durationSeconds != null } && !mapped.tracksDuration) {
+                if (it.exercise.cardio != null) mapped.copy(cardio = it.exercise.cardio)
+                else mapped.copy(movement = (mapped.movement ?: MovementDetails()).let { movement ->
+                    movement.copy(measures = movement.measures + Measure.DURATION)
+                })
+            } else mapped
+            it.copy(exercise = exercise)
         }) },
         importSource = null,
     )

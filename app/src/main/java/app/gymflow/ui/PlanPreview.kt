@@ -102,19 +102,15 @@ fun PlanPreview(
             val known = volumes.filterNotNull()
             if (known.isNotEmpty()) Muted(stringResource(if (known.size == volumes.size) R.string.plan_workload else R.string.plan_known_workload,
                 number(known.sum())))
-            if (current.exercises.isEmpty()) Muted(stringResource(R.string.plan_empty))
             val usedBlocks = current.exercises.mapTo(hashSetOf()) { it.plan.blockId }
-            current.trainingBlocks.filter { it.enabled && it.id !in usedBlocks && it.guidance.isNotBlank() }.forEach { block ->
-                SectionTitle(block.name)
-                Muted(block.requirement.label)
-                Muted(block.guidance)
-            }
+            val standalone = current.trainingBlocks.filter { it.enabled && it.id !in usedBlocks && it.hasGuidance }
+            if (current.exercises.isEmpty() && standalone.isEmpty()) Muted(stringResource(R.string.plan_empty))
+            val (prep, after) = standalone.partition { it.type in setOf(BlockType.WARMUP, BlockType.PREPARATION) }
+            prep.forEach { PlannedBlock(it) }
             current.exercises.forEachIndexed { index, item ->
                 val block = current.trainingBlocks.find { it.id == item.plan.blockId }
                 if (block != null && current.exercises.getOrNull(index - 1)?.plan?.blockId != block.id) {
-                    SectionTitle(block.name)
-                    if (block.guidance.isNotBlank()) Muted(block.guidance)
-                    if (block.requirement != PlanBlock.REQUIRED) Muted(block.requirement.label)
+                    PlannedBlock(block)
                 }
                 key(item.id) {
                     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -171,6 +167,7 @@ fun PlanPreview(
                     }
                 }
             }
+            after.forEach { PlannedBlock(it) }
             OutlinedButton(onClick = { editing = "new" }) { Text(stringResource(R.string.add_exercise)) }
         }
     }
@@ -208,6 +205,14 @@ fun PlanPreview(
 }
 
 @Composable
+private fun PlannedBlock(block: TrainingBlock) {
+    SectionTitle(block.name)
+    block.durationSeconds?.let { Muted(durationText(it)) }
+    if (block.guidance.isNotBlank()) Muted(block.guidance)
+    if (block.requirement != PlanBlock.REQUIRED) Muted(block.requirement.label)
+}
+
+@Composable
 fun TemplatePicker(programs: List<Program>, selected: WorkoutTemplate?, choose: (WorkoutTemplate?) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val days = remember(programs) { programs.filterNot(Program::archived).flatMap { program -> program.days.map { program.title to it } } }
@@ -238,6 +243,9 @@ fun workoutStatus(value: WorkoutStatus): String = stringResource(when (value) {
 
 @Composable
 fun plannedSetText(plan: SetPlan, exercise: Exercise): String {
+    if (exercise.tracksDuration || plan.durationSeconds != null) {
+        return plan.durationSeconds?.let(::durationText) ?: "Время не задано"
+    }
     val weight = if (plan.weightKnown) number(plan.weight) else stringResource(R.string.unknown_value)
     val reps = when {
         plan.maxEffort -> stringResource(R.string.max_effort)
@@ -248,6 +256,10 @@ fun plannedSetText(plan: SetPlan, exercise: Exercise): String {
     }
     return "$weight ${unitText(exercise.unit)} × $reps"
 }
+
+internal fun durationText(seconds: Double): String = if (seconds >= 60 && seconds % 60 == 0.0) {
+    "${number(seconds / 60)} мин"
+} else "${number(seconds)} с"
 
 @Composable
 fun actualText(actual: Actual, exercise: Exercise): String {

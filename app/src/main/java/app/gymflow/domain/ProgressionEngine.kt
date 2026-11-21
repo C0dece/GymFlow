@@ -50,7 +50,7 @@ class ProgressionIndex(sessions: List<Session>) {
     private val sawSession = mutableSetOf<String>()
 
     init {
-        sessions.sortedWith(newestSessionFirst).forEach { session ->
+        sessions.filterNot(Session::discarded).sortedWith(newestSessionFirst).forEach { session ->
             (session.workouts + session.otherWorkouts.asReversed()).forEach { workout ->
                 val profile = workout.profile.id
                 if (session.status == SessionStatus.SKIPPED || workout.status == WorkoutStatus.SKIPPED) {
@@ -120,6 +120,9 @@ class ProgressionEngine(private val index: ProgressionIndex, private val policie
                 selectedPolicy?.version ?: 1, action, reason, rules, history.map { it.evidence }, baseline, proposed,
                 rules.map { id -> config.rules.find { it.id == id }?.name?.takeIf { it.isNotBlank() } ?: id.take(8) },
                 baseline.takeIf { templateId != null })
+        }
+        if (exercise.tracksDuration || baseline.any { it.durationSeconds != null }) {
+            return decision(ActionKind.HOLD, ProgressionReason.DISABLED)
         }
         val latestMetrics = metrics.firstOrNull()
         if (latestMetrics?.discomfort == true) return decision(ActionKind.REVIEW_EXERCISE, ProgressionReason.DISCOMFORT)

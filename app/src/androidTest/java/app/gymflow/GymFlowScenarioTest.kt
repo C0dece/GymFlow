@@ -1211,6 +1211,94 @@ class GymFlowScenarioTest {
         assertEquals("missing", shell("test ! -e '$path/Заметки/Локальный черновик.md' && printf missing"))
     }
 
+    @Test fun editsTimedActivitiesAndCancelsOrDeletesWorkouts() {
+        createVault()
+        selectFolder()
+        val repo = app.repository
+        val person = Profile(name = "Атлет QA")
+        val day = ProgramDay(title = "Выносливость QA")
+        val program = Program(title = "Тренировки на время QA", days = listOf(day), enabled = false)
+        runBlocking { repo.save(person); repo.save(program); repo.flush() }
+        fun field(tag: String, value: String) {
+            await(tag)
+            ui.onNodeWithTag(tag).performScrollTo()
+            replace(tag, value)
+            hideKeyboard()
+        }
+        click("nav_program")
+        await("program_${program.id}")
+        scrollClick("program_${program.id}")
+        scrollClick("program_day_0")
+        scrollClick("add_training_block")
+        scrollClick("training_block_type")
+        scrollClick("training_block_type_WARMUP")
+        field("block_duration", "300")
+        field("block_guidance", "Лёгкая ходьба")
+        scrollClick("save_training_block")
+        scrollClick("program_add_exercise")
+        field("exercise_name", "Ходьба QA")
+        scrollClick("exercise_mode")
+        scrollClick("exercise_mode_CARDIO")
+        scrollClick("exercise_cardio")
+        scrollClick("exercise_cardio_WALK")
+        scrollClick("plan_set_0")
+        field("plan_0_duration", "600")
+        ui.onNodeWithTag("plan_0_weight").assertDoesNotExist()
+        screenshot("universal-cardio-editor")
+        scrollClick("save_exercise")
+        ui.waitUntil(12_000) { runBlocking { repo.library.first().programs.single().days.single().exercises.isNotEmpty() } }
+        val edited = runBlocking { repo.library.first().programs.single() }
+        assertEquals(300.0, edited.days.single().blocks.single().durationSeconds!!, 0.0)
+        assertEquals("Лёгкая ходьба", edited.days.single().blocks.single().guidance)
+        assertEquals(600.0, edited.days.single().exercises.single().sets.single().durationSeconds!!, 0.0)
+        screenshot("universal-program-day")
+        val saved = scheduledSession(edited, edited.days.single(), LocalDate.now(), listOf(person))
+        runBlocking { repo.save(saved); repo.flush() }
+        click("nav_home")
+        screenshot("universal-home")
+        fun startPlan() {
+            scrollClick("start_training")
+            click("confirm_start_plan")
+            await("workout")
+        }
+        fun record(seconds: String) {
+            scrollClick("edit_set_0")
+            field("measure_DURATION", seconds)
+            ui.onNodeWithTag("set_weight").assertDoesNotExist()
+            scrollClick("save_set")
+            withActiveFile { _, session ->
+                assertEquals(seconds.toDouble(), session.defaultWorkout.exercises.single().athletes.single().sets.single().actual?.measurements?.get(Measure.DURATION))
+            }
+        }
+        startPlan()
+        record("580")
+        scrollClick("workout_menu")
+        scrollClick("cancel_workout")
+        click("confirm_discard_workout")
+        assertEquals(saved, waitForFile(SessionStatus.PLANNED).second)
+        startPlan()
+        record("620")
+        click("finish_workout")
+        click("confirm_finish")
+        val (file, completed) = waitForFile(SessionStatus.COMPLETED)
+        click("nav_history")
+        scrollClick("history_session")
+        scrollClick("workout_menu")
+        scrollClick("delete_workout")
+        click("confirm_discard_workout")
+        ui.waitUntil(15_000) { runBlocking { repo.library.first().sessions.none { it.id == completed.id } } }
+        ui.waitUntil(15_000) { (Markdown.read(shell("cat '$file'"))?.document as? Session)?.discarded == true }
+        assertEquals(completed.copy(discarded = true), Markdown.read(shell("cat '$file'"))?.document)
+        click("nav_home")
+        scrollClick("start_training")
+        await("workout")
+        scrollClick("workout_menu")
+        scrollClick("cancel_workout")
+        click("confirm_discard_workout")
+        ui.waitUntil(15_000) { runBlocking { repo.library.first().active() == null } }
+        assertTrue(runBlocking { repo.library.first().sessions.isEmpty() })
+    }
+
     @Test fun editsIndividualPlanSetsAndKeepsCompletedMarkdownHistory() {
         createVault()
         selectFolder()
@@ -1269,7 +1357,7 @@ class GymFlowScenarioTest {
         assertEquals(SetRole.WARMUP, program().days.single().exercises.single().sets.first().purpose)
 
         scrollClick("edit_program_exercise_0")
-        ui.onNodeWithText("Изменить количество").performScrollTo().performClick()
+        scrollClick("resize_plan_sets")
         field("plan_set_count", "35")
         scrollClick("apply_plan_count")
         await("plan_set_34")

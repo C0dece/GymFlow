@@ -42,6 +42,7 @@ internal data class CyclePosition(
 )
 
 internal fun ParticipantWorkout.hasCycleResult(): Boolean {
+    if (guidanceOnly) return true
     val entries = exercises.flatMap { listOf(it) + it.replaced }
     val primary = entries.filter { it.plan.block == PlanBlock.REQUIRED }.ifEmpty { entries }
     val sets = primary.flatMap { it.athletes.single().sets }
@@ -58,7 +59,7 @@ internal fun ParticipantWorkout.creditCycle(): ParticipantWorkout =
 
 internal fun cyclePosition(program: Program, profileId: String, sessions: List<Session>): CyclePosition {
     val config = requireNotNull(program.completionCycle)
-    val records = sessions.sortedWith(newestSessionFirst.reversed()).flatMap { session ->
+    val records = sessions.filterNot(Session::discarded).sortedWith(newestSessionFirst.reversed()).flatMap { session ->
         session.allWorkouts.filter { it.profile.id == profileId && it.cycleSlot?.programId == program.id &&
             it.cycleSlot.templateId == it.templateId }.map { WorkoutDayRecord(session, it) }
     }
@@ -74,7 +75,7 @@ internal fun cyclePosition(program: Program, profileId: String, sessions: List<S
             (record.session.status != SessionStatus.COMPLETED || record.workout in record.session.otherWorkouts) &&
             record.session.status != SessionStatus.SKIPPED
     }
-    val days = program.days.filter { it.orderedExercises().isNotEmpty() }
+    val days = program.days.filter(WorkoutTemplate::hasActivities)
     val last = completed[count]?.workout?.templateId
     val lastIndex = last?.let { id -> days.indexOfFirst { it.id == id } } ?: -1
     val next = days.find { it.id == pending?.workout?.templateId }

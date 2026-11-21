@@ -25,8 +25,14 @@ internal data class PlanSetDraft(
     val target: String = base.targetReps?.toString().orEmpty(),
     val role: SetRole = base.purpose,
     val maxEffort: Boolean = base.maxEffort,
+    val duration: String = base.durationSeconds?.let(::number).orEmpty(),
 ) {
-    fun result(): SetPlan? {
+    fun result(timed: Boolean = false): SetPlan? {
+        val seconds = decimal(duration)?.takeIf(Measure.DURATION::accepts)
+        if (duration.isNotBlank() && seconds == null) return null
+        if (timed || base.durationSeconds != null) return base.copy(durationSeconds = seconds,
+            role = if (role == base.purpose) base.role else role,
+            warmup = if (role == base.purpose) base.warmup else role == SetRole.WARMUP)
         val amount = decimal(weight)
         val minimum = positiveInt(low)
         val maximum = if (high.isBlank()) minimum else positiveInt(high)
@@ -45,6 +51,7 @@ internal data class PlanSetDraft(
             role = if (role == base.purpose) base.role else role,
             warmup = if (role == base.purpose) base.warmup else role == SetRole.WARMUP,
             maxEffort = maxEffort,
+            durationSeconds = seconds,
         )
     }
 }
@@ -53,14 +60,15 @@ private fun encodePlanSets(rows: List<PlanSetDraft>): List<String> = rows.flatMa
     val base = row.base
     listOf(row.key, base.weight.toString(), base.repsMin.toString(), base.repsMax.toString(), base.warmup.toString(),
         base.weightKnown.toString(), base.maxEffort.toString(), base.repsKnown.toString(), base.targetReps?.toString().orEmpty(),
-        base.role?.name.orEmpty(), row.weight, row.low, row.high, row.target, row.role.name, row.maxEffort.toString())
+        base.role?.name.orEmpty(), row.weight, row.low, row.high, row.target, row.role.name, row.maxEffort.toString(),
+        base.durationSeconds?.toString().orEmpty(), row.duration)
 }
 
-private fun decodePlanSets(data: List<String>): List<PlanSetDraft> = data.chunked(16).map { row ->
+private fun decodePlanSets(data: List<String>): List<PlanSetDraft> = data.chunked(18).map { row ->
     PlanSetDraft(row[0], SetPlan(row[1].toDouble(), row[2].toInt(), row[3].toInt(), row[4].toBoolean(),
         row[5].toBoolean(), row[6].toBoolean(), row[7].toBoolean(), row[8].toIntOrNull(),
-        row[9].takeIf(String::isNotEmpty)?.let(SetRole::valueOf)),
-        row[10], row[11], row[12], row[13], SetRole.valueOf(row[14]), row[15].toBoolean())
+        row[9].takeIf(String::isNotEmpty)?.let(SetRole::valueOf), row[16].toDoubleOrNull()),
+        row[10], row[11], row[12], row[13], SetRole.valueOf(row[14]), row[15].toBoolean(), row[17])
 }
 
 private val planSetsSaver = listSaver(save = { encodePlanSets(it) }, restore = ::decodePlanSets)
@@ -77,8 +85,8 @@ internal fun rememberPersonalSets(): MutableState<Map<String, List<PlanSetDraft>
 internal fun rememberPlanSets(initial: List<SetPlan>): MutableState<List<PlanSetDraft>> =
     rememberSaveable(stateSaver = planSetsSaver) { mutableStateOf(initial.map { PlanSetDraft(newId(), it) }) }
 
-internal fun List<PlanSetDraft>.plansOrNull(): List<SetPlan>? =
-    if (isEmpty()) null else mapNotNull(PlanSetDraft::result).takeIf { it.size == size }
+internal fun List<PlanSetDraft>.plansOrNull(timed: Boolean = false): List<SetPlan>? =
+    if (isEmpty()) null else mapNotNull { it.result(timed) }.takeIf { it.size == size }
 
 @Composable
 internal fun PlanEditorActions(close: () -> Unit, label: String, enabled: Boolean, tag: String, save: () -> Unit) {
@@ -89,22 +97,24 @@ internal fun PlanEditorActions(close: () -> Unit, label: String, enabled: Boolea
 }
 
 @Composable
-internal fun PlanSets(rows: List<PlanSetDraft>, unit: UnitWeight, fallback: SetPlan, change: (List<PlanSetDraft>) -> Unit) {
+internal fun PlanSets(rows: List<PlanSetDraft>, exercise: Exercise, fallback: SetPlan, change: (List<PlanSetDraft>) -> Unit) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var resize by rememberSaveable { mutableStateOf(false) }
     var count by rememberSaveable { mutableStateOf("") }
     var undo by remember { mutableStateOf<List<PlanSetDraft>?>(null) }
     fun apply(next: List<PlanSetDraft>) { undo = null; change(next) }
     fun append() {
-        val draft = PlanSetDraft(newId(), rows.lastOrNull()?.result() ?: fallback)
+        val draft = PlanSetDraft(newId(), rows.lastOrNull()?.result(exercise.tracksDuration) ?: fallback)
         apply(rows + draft)
         selected = draft.key
     }
-    SectionTitle("План подходов · ${rows.size}")
-    if (rows.isEmpty()) Muted("Добавьте хотя бы один подход.")
-    TextButton(onClick = { resize = !resize; count = rows.size.toString() }) {
-        Text(if (resize) "Скрыть количество" else "Изменить количество")
+    Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Text("Подходы · ${rows.size}", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = { resize = !resize; count = rows.size.toString() }, modifier = Modifier.testTag("resize_plan_sets")) {
+            Text(if (resize) "Скрыть" else "Количество")
+        }
     }
+    if (rows.isEmpty()) Muted("Добавьте хотя бы один подход.")
     if (resize) {
         val size = positiveInt(count)?.takeIf { it <= maxOf(maxNewSets, rows.size) }
         Field(count, "Количество подходов", { count = it }, Modifier.testTag("plan_set_count"), KeyboardType.Number,
@@ -115,7 +125,7 @@ internal fun PlanSets(rows: List<PlanSetDraft>, unit: UnitWeight, fallback: SetP
                     undo = rows
                     change(rows.take(size))
                 } else {
-                    val base = rows.lastOrNull()?.result() ?: fallback
+                    val base = rows.lastOrNull()?.result(exercise.tracksDuration) ?: fallback
                     apply(rows + List(size - rows.size) { PlanSetDraft(newId(), base) })
                 }
                 resize = false
@@ -126,7 +136,7 @@ internal fun PlanSets(rows: List<PlanSetDraft>, unit: UnitWeight, fallback: SetP
     }
     rows.forEachIndexed { index, row ->
         key(row.key) {
-            val valid = row.result()
+            val valid = row.result(exercise.tracksDuration)
             val expanded = selected == row.key
             CardBlock {
                 TextButton(onClick = { selected = if (expanded) null else row.key },
@@ -135,19 +145,11 @@ internal fun PlanSets(rows: List<PlanSetDraft>, unit: UnitWeight, fallback: SetP
                         Text("Подход ${index + 1} · ${row.role.label}", style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface)
                         if (valid == null) Text("Проверьте значения", color = MaterialTheme.colorScheme.error)
-                        else {
-                            val load = if (valid.weightKnown) "${number(valid.weight)} ${unitText(unit)}" else "Вес не указан"
-                            val reps = when {
-                                valid.maxEffort -> "До отказа"
-                                !valid.repsKnown -> "Повторы не указаны"
-                                else -> "${repRange(valid.repsMin, valid.repsMax)} повт."
-                            }
-                            Muted("$load · $reps${valid.targetReps?.let { " · цель $it" }.orEmpty()}")
-                        }
+                        else Muted(plannedSetText(valid, exercise))
                     }
                 }
                 if (expanded) {
-                    PlanSetFields(row, unit, "plan_$index") { next -> apply(rows.map { if (it.key == row.key) next else it }) }
+                    PlanSetFields(row, exercise, "plan_$index") { next -> apply(rows.map { if (it.key == row.key) next else it }) }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         TextButton(onClick = { apply(rows.toMutableList().apply { add(index - 1, removeAt(index)) }) },
                             enabled = index > 0, modifier = Modifier.testTag("plan_up_$index")) { Text("Выше") }
@@ -178,19 +180,24 @@ internal fun PlanSets(rows: List<PlanSetDraft>, unit: UnitWeight, fallback: SetP
 }
 
 @Composable
-internal fun PlanSetFields(row: PlanSetDraft, unit: UnitWeight, tag: String, change: (PlanSetDraft) -> Unit) {
-    Field(row.weight, "Вес, ${unitText(unit)}", { change(row.copy(weight = it)) }, Modifier.testTag("${tag}_weight"),
-        KeyboardType.Decimal, error = row.weight.isNotBlank() && decimal(row.weight) == null)
-    if (!row.maxEffort) {
-        AdaptivePair {
-            Field(row.low, "Повторы", { change(row.copy(low = it)) }, Modifier.weight(1f).testTag("${tag}_reps"), KeyboardType.Number)
-            Field(row.high, "До (необяз.)", { change(row.copy(high = it)) }, Modifier.weight(1f).testTag("${tag}_reps_max"), KeyboardType.Number)
+internal fun PlanSetFields(row: PlanSetDraft, exercise: Exercise, tag: String, change: (PlanSetDraft) -> Unit) {
+    val timed = exercise.tracksDuration || row.base.durationSeconds != null
+    if (timed) {
+        Field(row.duration, "Плановое время, с", { change(row.copy(duration = it)) }, Modifier.testTag("${tag}_duration"),
+            KeyboardType.Decimal, error = row.duration.isNotBlank() && decimal(row.duration)?.let(Measure.DURATION::accepts) != true)
+    } else {
+        Field(row.weight, "Вес, ${unitText(exercise.unit)}", { change(row.copy(weight = it)) }, Modifier.testTag("${tag}_weight"),
+            KeyboardType.Decimal, error = row.weight.isNotBlank() && decimal(row.weight) == null)
+        if (!row.maxEffort) {
+            AdaptivePair {
+                Field(row.low, "Повторы", { change(row.copy(low = it)) }, Modifier.weight(1f).testTag("${tag}_reps"), KeyboardType.Number)
+                Field(row.high, "До (необяз.)", { change(row.copy(high = it)) }, Modifier.weight(1f).testTag("${tag}_reps_max"), KeyboardType.Number)
+            }
+            Field(row.target, "Цель повторов", { change(row.copy(target = it)) }, Modifier.testTag("${tag}_target"), KeyboardType.Number)
         }
-        Field(row.target, "Цель повторов", { change(row.copy(target = it)) }, Modifier.testTag("${tag}_target"), KeyboardType.Number)
-    }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(row.maxEffort, { change(row.copy(maxEffort = !row.maxEffort)) }, label = { Text("До отказа") })
     }
     Choice(row.role, SetRole.entries, { it.label }, { change(row.copy(role = it)) }, "${tag}_role")
-    if (row.result() == null) InlineStatus("Проверьте вес, диапазон и цель повторов.", warning = true)
+    if (row.result(timed) == null) InlineStatus(if (timed) "Укажите время от 0,01 до 86400 секунд." else
+        "Проверьте вес, диапазон и цель повторов.", warning = true)
 }

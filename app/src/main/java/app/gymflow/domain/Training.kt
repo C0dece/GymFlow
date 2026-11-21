@@ -25,7 +25,7 @@ fun ParticipantWorkout.nextExerciseId(): String? {
 }
 
 fun SetPlan.volumeKg(exercise: Exercise): Double? {
-    if (purpose != SetRole.WORK || !weightKnown || !repsKnown || maxEffort) return null
+    if (purpose != SetRole.WORK || !weightKnown || !repsKnown || maxEffort || durationSeconds != null || exercise.tracksDuration) return null
     return loadFactor(exercise)?.let { weight * repsMax * it }
 }
 
@@ -66,7 +66,7 @@ fun plannedOn(program: Program, date: LocalDate): List<ProgramDay> {
 internal fun updateUnusedPlans(before: Program, after: Program, sessions: List<Session>): List<Session> {
     if (before.days == after.days) return emptyList()
     return sessions.mapNotNull { session ->
-        if (session.programId != before.id || session.status != SessionStatus.PLANNED ||
+        if (session.discarded || session.programId != before.id || session.status != SessionStatus.PLANNED ||
             session.started != null || session.progression.isNotEmpty() || session.otherWorkouts.isNotEmpty()) return@mapNotNull null
         val prior = before.days.find { it.id == session.programDayId } ?: return@mapNotNull null
         val next = after.days.find { it.id == prior.id }
